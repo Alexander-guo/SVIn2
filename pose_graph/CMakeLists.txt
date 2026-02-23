@@ -119,4 +119,10 @@ install(DIRECTORY include/
 
 #ROS2 does not understand raw package paths 
 install(DIRECTORY Vocabulary DESTINATION share/${PROJECT_NAME})
+
+# Install shared config files (from repo-level `config/`) so runtime lookups                                                                                                                           
+install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/config
+  DESTINATION share/${PROJECT_NAME}
+)
+
 ament_package()
