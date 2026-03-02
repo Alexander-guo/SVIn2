@@ -45,6 +45,7 @@ if(BUILD_TESTS)
   add_executable(${PROJECT_TEST_NAME}
     test/runTests.cpp
     test/TestPinholeCamera.cpp
+    test/TestDoubleSphereCamera.cpp
     test/TestFrame.cpp
     test/TestNCameraSystem.cpp
     test/TestMultiFrame.cpp
@@ -53,8 +54,6 @@ if(BUILD_TESTS)
     ${PROJECT_NAME}
       gtest
       gtest_main
-      gmock
-      gmock_main 
     pthread)
   add_test(test ${PROJECT_TEST_NAME})
 endif()

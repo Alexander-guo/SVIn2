@@ -42,9 +42,10 @@ class DoubleSphereCamera : public CameraBase {
   /// @param[in] focalLengthV The vertical focal length in pixels.
   /// @param[in] imageCenterU The horizontal centre in pixels.
   /// @param[in] imageCenterV The vertical centre in pixels.
-  /// @param[in] xi The distance between the centers of the two virtual spheres in pixels.
-  /// @param[in] alpha The parameter controls the relative scaling and distortions,
-  ///            representing the projection from the second sphere onto the final image plane.
+  /// @param[in] xi The distance between the centers of the two virtual spheres in range [-1, 1].
+  /// @param[in] alpha The parameter controls the relative scaling and distortions in range [0, 1], 
+  ///            representing the projection from the second sphere onto the final image plane,
+  ///            where alpha=0 corresponds to the unified projection model and alpha=1 corresponds to the shifted pinhole model.
   /// @param[in] distortion The distortion object to be used.
   /// @param[in] id Assign a generic ID, if desired.
   DoubleSphereCamera(int imageWidth,
