@@ -107,6 +107,8 @@ class VioParametersReader {
     Eigen::Vector2d focalLength;             ///< Focal length.
     Eigen::Vector2d principalPoint;          ///< Principal point.
     std::string distortionType;              ///< Distortion type. ('radialtangential' 'plumb_bob' 'equdistant')
+    std::string projectionType;              ///< Projection type. ('pinhole' 'double_sphere')
+    Eigen::Vector2d doubleSphereParams;  ///< Double sphere parameters (xi, alpha) for double sphere projection model.
   };
 
   /// If readConfigFile() has been called at least once this is true
