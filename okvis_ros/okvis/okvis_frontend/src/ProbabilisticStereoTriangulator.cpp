@@ -48,7 +48,9 @@
 // cameras and distortions
 #include <algorithm>
 #include <memory>
+#include <okvis/cameras/DoubleSphereCamera.hpp>
 #include <okvis/cameras/EquidistantDistortion.hpp>
+#include <okvis/cameras/NoDistortion.hpp>
 #include <okvis/cameras/PinholeCamera.hpp>
 #include <okvis/cameras/RadialTangentialDistortion.hpp>
 #include <okvis/cameras/RadialTangentialDistortion8.hpp>
@@ -369,6 +371,8 @@ template class ProbabilisticStereoTriangulator<
     okvis::cameras::PinholeCamera<okvis::cameras::RadialTangentialDistortion> >;
 template class ProbabilisticStereoTriangulator<
     okvis::cameras::PinholeCamera<okvis::cameras::RadialTangentialDistortion8> >;
+template class ProbabilisticStereoTriangulator<
+  okvis::cameras::DoubleSphereCamera<okvis::cameras::NoDistortion> >;
 
 }  // namespace triangulation
 }  // namespace okvis

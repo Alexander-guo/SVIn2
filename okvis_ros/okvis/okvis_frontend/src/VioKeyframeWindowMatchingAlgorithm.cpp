@@ -46,7 +46,9 @@
 
 // cameras and distortions
 #include <algorithm>
+#include <okvis/cameras/DoubleSphereCamera.hpp>
 #include <okvis/cameras/EquidistantDistortion.hpp>
+#include <okvis/cameras/NoDistortion.hpp>
 #include <okvis/cameras/PinholeCamera.hpp>
 #include <okvis/cameras/RadialTangentialDistortion.hpp>
 #include <okvis/cameras/RadialTangentialDistortion8.hpp>
@@ -497,6 +499,7 @@ void VioKeyframeWindowMatchingAlgorithm<CAMERA_GEOMETRY_T>::setBestMatch(size_t 
           scm_numMatches_++;*/
 }
 
+// TODO: add support for double sphere camera here.
 template class VioKeyframeWindowMatchingAlgorithm<
     okvis::cameras::PinholeCamera<okvis::cameras::RadialTangentialDistortion> >;
 
@@ -505,5 +508,8 @@ template class VioKeyframeWindowMatchingAlgorithm<
 
 template class VioKeyframeWindowMatchingAlgorithm<
     okvis::cameras::PinholeCamera<okvis::cameras::RadialTangentialDistortion8> >;
+
+template class VioKeyframeWindowMatchingAlgorithm<
+  okvis::cameras::DoubleSphereCamera<okvis::cameras::NoDistortion> >;
 
 }  // namespace okvis

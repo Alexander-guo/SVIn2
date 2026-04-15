@@ -49,7 +49,7 @@
 /// \brief okvis Main namespace of this package.
 namespace okvis {
 
-static const int max_frame_sync_buffer_size = 3;
+static const int max_frame_sync_buffer_size = 30;
 
 // Constructor. Calls init().
 FrameSynchronizer::FrameSynchronizer(okvis::VioParameters& parameters)
@@ -69,6 +69,7 @@ FrameSynchronizer::~FrameSynchronizer() {}
 
 // Initialise the synchronizer with new parameters. Is called in the constructor.
 void FrameSynchronizer::init(okvis::VioParameters& parameters) {
+  std::lock_guard<std::mutex> lock(mutex_);
   parameters_ = parameters;
   numCameras_ = parameters.nCameraSystem.numCameras();
   timeTol_ = parameters.sensors_information.frameTimestampTolerance;
@@ -77,6 +78,7 @@ void FrameSynchronizer::init(okvis::VioParameters& parameters) {
 
 // Adds a new frame to the internal buffer and returns the Multiframe containing the frame.
 std::shared_ptr<okvis::MultiFrame> FrameSynchronizer::addNewFrame(std::shared_ptr<okvis::CameraMeasurement>& frame) {
+  std::lock_guard<std::mutex> lock(mutex_);
   assert(numCameras_ > 0);
   okvis::Time frame_stamp = frame->timeStamp;
   std::shared_ptr<okvis::MultiFrame> multiFrame;
@@ -108,6 +110,7 @@ std::shared_ptr<okvis::MultiFrame> FrameSynchronizer::addNewFrame(std::shared_pt
 
 // Inform the synchronizer that a frame in the multiframe has completed keypoint detection and description.
 bool FrameSynchronizer::detectionEndedForMultiFrame(uint64_t multiFrameId) {
+  std::lock_guard<std::mutex> lock(mutex_);
   int position;
   bool found = findFrameById(multiFrameId, position);
   if (found) {
@@ -122,6 +125,7 @@ bool FrameSynchronizer::detectionEndedForMultiFrame(uint64_t multiFrameId) {
 // This will return true if the internal counter on how many times detectionEndedForMultiFrame()
 // has been called for this multiframe equals the number of cameras in the system.
 bool FrameSynchronizer::detectionCompletedForAllCameras(uint64_t multiFrameId) {
+  std::lock_guard<std::mutex> lock(mutex_);
   int position;
   if (findFrameById(multiFrameId, position)) {
     if (frameBuffer_[position].second == numCameras_) {

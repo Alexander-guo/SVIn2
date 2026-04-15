@@ -782,9 +782,12 @@ void ThreadedKFVio::imuConsumerLoop() {
     const okvis::Time* end;  // do not need to copy end timestamp
     {
       std::lock_guard<std::mutex> imuLock(imuMeasurements_mutex_);
-      OKVIS_ASSERT_TRUE(Exception,
-                        imuMeasurements_.empty() || imuMeasurements_.back().timeStamp < data.timeStamp,
-                        "IMU measurement from the past received");
+      if (!imuMeasurements_.empty() && !(imuMeasurements_.back().timeStamp < data.timeStamp)) {
+        LOG(WARNING) << "Dropping out-of-order IMU measurement: last="
+                     << imuMeasurements_.back().timeStamp.toSec() << ", new=" << data.timeStamp.toSec();
+        processImuTimer.stop();
+        continue;
+      }
 
       if (parameters_.publishing.publishImuPropagatedState) {
         if (!repropagationNeeded_ && imuMeasurements_.size() > 0) {

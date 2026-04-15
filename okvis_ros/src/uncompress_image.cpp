@@ -31,14 +31,10 @@ class UncompressImage : public rclcpp::Node {
   void compressedImageCallback(const sensor_msgs::msg::CompressedImage::ConstSharedPtr compressed_img_msg_ptr) {
     RCLCPP_INFO_ONCE(this->get_logger(), "Got Compressed image");
 
-    rclcpp::Time stamp = compressed_img_msg_ptr->header.stamp;
-    std_msgs::msg::Header header;
-    header.stamp = stamp;
-    header.frame_id = compressed_img_msg_ptr->header.frame_id;
-
     cv_bridge::CvImageConstPtr cv_ptr = cv_bridge::toCvCopy(compressed_img_msg_ptr);
-
-    output_img_pub_->publish(*cv_ptr->toImageMsg());
+    sensor_msgs::msg::Image image_msg = *cv_ptr->toImageMsg();
+    image_msg.header = compressed_img_msg_ptr->header;
+    output_img_pub_->publish(image_msg);
   }
 };
 

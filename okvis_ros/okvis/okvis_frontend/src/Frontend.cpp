@@ -53,6 +53,8 @@
 #include <algorithm>
 #include <memory>
 #include <okvis/cameras/EquidistantDistortion.hpp>
+#include <okvis/cameras/DoubleSphereCamera.hpp>
+#include <okvis/cameras/NoDistortion.hpp>
 #include <okvis/cameras/PinholeCamera.hpp>
 #include <okvis/cameras/RadialTangentialDistortion.hpp>
 #include <okvis/cameras/RadialTangentialDistortion8.hpp>
@@ -135,6 +137,22 @@ bool Frontend::dataAssociationAndInitialization(
   }
   int num3dMatches = 0;
 
+  // find camera model (Currently only supports all cameras having the same model. TODO: add support for mixed camera models)
+  const std::string cameraModel0 = params.nCameraSystem.cameraGeometry(0)->type();
+  const bool isDoubleSphereCameraModel = cameraModel0.rfind("DoubleSphereCamera<", 0) == 0;
+  const bool isPinholeCameraModel = cameraModel0.rfind("PinholeCamera<", 0) == 0;
+  OKVIS_ASSERT_TRUE(Exception,
+                    isPinholeCameraModel || isDoubleSphereCameraModel,
+                    "Unsupported camera model: " + cameraModel0);
+  for (size_t i = 1; i < params.nCameraSystem.numCameras(); ++i) {
+    const std::string cameraModelI = params.nCameraSystem.cameraGeometry(i)->type();
+    const bool sameModelClass =
+        (isDoubleSphereCameraModel && cameraModelI.rfind("DoubleSphereCamera<", 0) == 0) ||
+        (isPinholeCameraModel && cameraModelI.rfind("PinholeCamera<", 0) == 0);
+    OKVIS_ASSERT_TRUE(
+        Exception, sameModelClass, "mixed camera model classes are not supported yet");
+  }
+
   // first frame? (did do addStates before, so 1 frame minimum in estimator)
   if (estimator.numFrames() > 1) {
     int requiredMatches = 5;
@@ -160,6 +178,15 @@ bool Frontend::dataAssociationAndInitialization(
       case okvis::cameras::NCameraSystem::RadialTangential8: {
         num3dMatches = matchToKeyframes<VioKeyframeWindowMatchingAlgorithm<
             okvis::cameras::PinholeCamera<okvis::cameras::RadialTangentialDistortion8> > >(
+            estimator, params, framesInOut->id(), rotationOnly, false, &uncertainMatchFraction);
+        break;
+      }
+      case okvis::cameras::NCameraSystem::NoDistortion: {
+        OKVIS_ASSERT_TRUE(Exception,
+                          isDoubleSphereCameraModel,
+                          "NoDistortion is only supported with DoubleSphereCamera in this frontend path.");
+        num3dMatches = matchToKeyframes<
+            VioKeyframeWindowMatchingAlgorithm<okvis::cameras::DoubleSphereCamera<okvis::cameras::NoDistortion> > >(
             estimator, params, framesInOut->id(), rotationOnly, false, &uncertainMatchFraction);
         break;
       }
@@ -204,6 +231,15 @@ bool Frontend::dataAssociationAndInitialization(
 
         break;
       }
+      case okvis::cameras::NCameraSystem::NoDistortion: {
+        OKVIS_ASSERT_TRUE(Exception,
+                          isDoubleSphereCameraModel,
+                          "NoDistortion is only supported with DoubleSphereCamera in this frontend path.");
+        matchToLastFrame<
+            VioKeyframeWindowMatchingAlgorithm<okvis::cameras::DoubleSphereCamera<okvis::cameras::NoDistortion> > >(
+            estimator, params, framesInOut->id(), false);
+        break;
+      }
       default:
         OKVIS_THROW(Exception, "Unsupported distortion type.")
         break;
@@ -229,6 +265,15 @@ bool Frontend::dataAssociationAndInitialization(
     case okvis::cameras::NCameraSystem::RadialTangential8: {
       matchStereo<VioKeyframeWindowMatchingAlgorithm<
           okvis::cameras::PinholeCamera<okvis::cameras::RadialTangentialDistortion8> > >(
+          estimator, params, framesInOut);
+      break;
+    }
+    case okvis::cameras::NCameraSystem::NoDistortion: {
+      OKVIS_ASSERT_TRUE(Exception,
+                        isDoubleSphereCameraModel,
+                        "NoDistortion is only supported with DoubleSphereCamera in this frontend path.");
+      matchStereo<
+          VioKeyframeWindowMatchingAlgorithm<okvis::cameras::DoubleSphereCamera<okvis::cameras::NoDistortion> > >(
           estimator, params, framesInOut);
       break;
     }
@@ -508,76 +553,89 @@ void Frontend::matchStereo(okvis::Estimator& estimator,
 
   bool rotationOnly_tmp = false;
   bool removeOutliers = true;
-  // do RANSAC 2D2D for initialization only
-  if (!isScaleRefined_ && numStatesToRefineScale_ <= 5) {
-    std::cout << "Performing Ransac2d2d to refine scale." << std::endl;
-    int numInliers = runRansac2d2dToRefineScale(estimator, params, mfId, mfId, true, removeOutliers, rotationOnly_tmp);
-    std::cout << "ransac2d2d num_inliers: " << numInliers << std::endl;
-    if (numInliers > 15) {
-      std::cout << "To refine scale: num_state " << numStatesToRefineScale_ << " num_inliers: " << numInliers
-                << std::endl;
-      numStatesToRefineScale_ += 1;  // Sharmin
-    }
-  }
-
-  if (!isScaleRefined_ && numStatesToRefineScale_ > 5) {
-    int n_state = numStatesToRefineScale_ * 3 + 3 + 1;
-
-    Eigen::MatrixXd A{n_state, n_state};
-    A.setZero();
-    Eigen::VectorXd b{n_state};
-    b.setZero();
-
-    for (size_t i = 0; i < ransac2d2d_R_WS.size() - 1; i++) {
-      Eigen::MatrixXd tmp_A(6, 10);
-      tmp_A.setZero();
-      Eigen::VectorXd tmp_b(6);
-      tmp_b.setZero();
-
-      double dt = imu_interal_dt.at(i);
-
-      tmp_A.block<3, 3>(0, 0) = -dt * Eigen::Matrix3d::Identity();
-      tmp_A.block<3, 3>(0, 6) = ransac2d2d_R_WS.at(i).transpose() * dt * dt / 2 * Eigen::Matrix3d::Identity();
-      tmp_A.block<3, 1>(0, 9) =
-          ransac2d2d_R_WS.at(i).transpose() * (ransac2d2d_t_WC.at(i + 1) - ransac2d2d_t_WC.at(i)) / 100.0;
-      tmp_b.block<3, 1>(0, 0) =
-          imu_interal_deltaP.at(i) +
-          ransac2d2d_R_WS.at(i).transpose() * ransac2d2d_R_WS.at(i + 1) * ransac2d2d_t_SC.at(i + 1) -
-          ransac2d2d_t_SC.at(i);
-      // cout << "delta_p   " << frame_j->second.pre_integration->delta_p.transpose() << endl;
-      tmp_A.block<3, 3>(3, 0) = -Eigen::Matrix3d::Identity();
-      tmp_A.block<3, 3>(3, 3) = ransac2d2d_R_WS.at(i).transpose() * ransac2d2d_R_WS.at(i + 1);
-      tmp_A.block<3, 3>(3, 6) = ransac2d2d_R_WS.at(i).transpose() * dt * Eigen::Matrix3d::Identity();
-      tmp_b.block<3, 1>(3, 0) = imu_interal_deltaV.at(i);
-      // cout << "delta_v   " << frame_j->second.pre_integration->delta_v.transpose() << endl;
-
-      Eigen::Matrix<double, 6, 6> cov_inv = Eigen::Matrix<double, 6, 6>::Zero();
-      // cov.block<6, 6>(0, 0) = IMU_cov[i + 1];
-      // MatrixXd cov_inv = cov.inverse();
-      cov_inv.setIdentity();
-
-      Eigen::MatrixXd r_A = tmp_A.transpose() * cov_inv * tmp_A;
-      Eigen::VectorXd r_b = tmp_A.transpose() * cov_inv * tmp_b;
-
-      A.block<6, 6>(i * 3, i * 3) += r_A.topLeftCorner<6, 6>();
-      b.segment<6>(i * 3) += r_b.head<6>();
-
-      A.bottomRightCorner<4, 4>() += r_A.bottomRightCorner<4, 4>();
-      b.tail<4>() += r_b.tail<4>();
-
-      A.block<6, 4>(i * 3, n_state - 4) += r_A.topRightCorner<6, 4>();
-      A.block<4, 6>(n_state - 4, i * 3) += r_A.bottomLeftCorner<4, 6>();
-    }
-
-    A = A * 1000.0;
-    b = b * 1000.0;
-    Eigen::VectorXd x = A.ldlt().solve(b);
-    double s = x(n_state - 1) / 100.0;
-
-    std::cout << "================= Scale =================== " << std::endl;
-    std::cout << "estimated scale: " << s << std::endl;
-
+  if (camNumber < 2) {
+    // Scale refinement needs at least a stereo pair; skip safely for mono configurations.
     isScaleRefined_ = true;
+  } else {
+    // do RANSAC 2D2D for initialization only
+    if (!isScaleRefined_ && numStatesToRefineScale_ <= 5) {
+      std::cout << "Performing Ransac2d2d to refine scale." << std::endl;
+      int numInliers =
+          runRansac2d2dToRefineScale(estimator, params, mfId, mfId, true, removeOutliers, rotationOnly_tmp);
+      std::cout << "ransac2d2d num_inliers: " << numInliers << std::endl;
+      if (numInliers > 15) {
+        std::cout << "To refine scale: num_state " << numStatesToRefineScale_ << " num_inliers: " << numInliers
+                  << std::endl;
+        numStatesToRefineScale_ += 1;  // Sharmin
+      }
+    }
+
+    if (!isScaleRefined_ && numStatesToRefineScale_ > 5) {
+      const bool hasEnoughScaleData =
+          (ransac2d2d_R_WS.size() > 1) && (ransac2d2d_t_WC.size() == ransac2d2d_R_WS.size()) &&
+          (ransac2d2d_t_SC.size() == ransac2d2d_R_WS.size()) &&
+          (imu_interal_dt.size() >= ransac2d2d_R_WS.size() - 1) &&
+          (imu_interal_deltaP.size() >= ransac2d2d_R_WS.size() - 1) &&
+          (imu_interal_deltaV.size() >= ransac2d2d_R_WS.size() - 1);
+
+      if (!hasEnoughScaleData) {
+        LOG(WARNING) << "Skipping scale refinement due to insufficient/intermittent data buffers.";
+      } else {
+        int n_state = numStatesToRefineScale_ * 3 + 3 + 1;
+
+        Eigen::MatrixXd A{n_state, n_state};
+        A.setZero();
+        Eigen::VectorXd b{n_state};
+        b.setZero();
+
+        for (size_t i = 0; i < ransac2d2d_R_WS.size() - 1; i++) {
+          Eigen::MatrixXd tmp_A(6, 10);
+          tmp_A.setZero();
+          Eigen::VectorXd tmp_b(6);
+          tmp_b.setZero();
+
+          double dt = imu_interal_dt.at(i);
+
+          tmp_A.block<3, 3>(0, 0) = -dt * Eigen::Matrix3d::Identity();
+          tmp_A.block<3, 3>(0, 6) = ransac2d2d_R_WS.at(i).transpose() * dt * dt / 2 * Eigen::Matrix3d::Identity();
+          tmp_A.block<3, 1>(0, 9) =
+              ransac2d2d_R_WS.at(i).transpose() * (ransac2d2d_t_WC.at(i + 1) - ransac2d2d_t_WC.at(i)) / 100.0;
+          tmp_b.block<3, 1>(0, 0) =
+              imu_interal_deltaP.at(i) +
+              ransac2d2d_R_WS.at(i).transpose() * ransac2d2d_R_WS.at(i + 1) * ransac2d2d_t_SC.at(i + 1) -
+              ransac2d2d_t_SC.at(i);
+          tmp_A.block<3, 3>(3, 0) = -Eigen::Matrix3d::Identity();
+          tmp_A.block<3, 3>(3, 3) = ransac2d2d_R_WS.at(i).transpose() * ransac2d2d_R_WS.at(i + 1);
+          tmp_A.block<3, 3>(3, 6) = ransac2d2d_R_WS.at(i).transpose() * dt * Eigen::Matrix3d::Identity();
+          tmp_b.block<3, 1>(3, 0) = imu_interal_deltaV.at(i);
+
+          Eigen::Matrix<double, 6, 6> cov_inv = Eigen::Matrix<double, 6, 6>::Zero();
+          cov_inv.setIdentity();
+
+          Eigen::MatrixXd r_A = tmp_A.transpose() * cov_inv * tmp_A;
+          Eigen::VectorXd r_b = tmp_A.transpose() * cov_inv * tmp_b;
+
+          A.block<6, 6>(i * 3, i * 3) += r_A.topLeftCorner<6, 6>();
+          b.segment<6>(i * 3) += r_b.head<6>();
+
+          A.bottomRightCorner<4, 4>() += r_A.bottomRightCorner<4, 4>();
+          b.tail<4>() += r_b.tail<4>();
+
+          A.block<6, 4>(i * 3, n_state - 4) += r_A.topRightCorner<6, 4>();
+          A.block<4, 6>(n_state - 4, i * 3) += r_A.bottomLeftCorner<4, 6>();
+        }
+
+        A = A * 1000.0;
+        b = b * 1000.0;
+        Eigen::VectorXd x = A.ldlt().solve(b);
+        double s = x(n_state - 1) / 100.0;
+
+        std::cout << "================= Scale =================== " << std::endl;
+        std::cout << "estimated scale: " << s << std::endl;
+
+        isScaleRefined_ = true;
+      }
+    }
   }
 
   // rotationOnly = rotationOnly_tmp;
@@ -687,6 +745,10 @@ int Frontend::runRansac2d2dToRefineScale(okvis::Estimator& estimator,
   // match 2d2d
   rotationOnly = false;
   const size_t numCameras = params.nCameraSystem.numCameras();
+
+  if (numCameras < 2) {
+    return 0;
+  }
 
   size_t totalInlierNumber = 0;
   bool rotation_only_success = false;

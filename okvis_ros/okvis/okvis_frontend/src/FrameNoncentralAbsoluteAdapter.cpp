@@ -43,7 +43,9 @@
 
 // cameras and distortions
 #include <memory>
+#include <okvis/cameras/DoubleSphereCamera.hpp>
 #include <okvis/cameras/EquidistantDistortion.hpp>
+#include <okvis/cameras/NoDistortion.hpp>
 #include <okvis/cameras/PinholeCamera.hpp>
 #include <okvis/cameras/RadialTangentialDistortion.hpp>
 #include <okvis/cameras/RadialTangentialDistortion8.hpp>
@@ -115,6 +117,13 @@ opengv::absolute_pose::FrameNoncentralAbsoluteAdapter::FrameNoncentralAbsoluteAd
           frame->geometryAs<okvis::cameras::PinholeCamera<okvis::cameras::EquidistantDistortion> >(im)->backProject(
               keypoint, &bearing);
           fu = frame->geometryAs<okvis::cameras::PinholeCamera<okvis::cameras::EquidistantDistortion> >(im)
+                   ->focalLengthU();
+          break;
+        }
+        case okvis::cameras::NCameraSystem::NoDistortion: {
+          frame->geometryAs<okvis::cameras::DoubleSphereCamera<okvis::cameras::NoDistortion> >(im)->backProject(
+              keypoint, &bearing);
+          fu = frame->geometryAs<okvis::cameras::DoubleSphereCamera<okvis::cameras::NoDistortion> >(im)
                    ->focalLengthU();
           break;
         }

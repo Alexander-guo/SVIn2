@@ -48,7 +48,9 @@
 
 // cameras and distortions
 #include <memory>
+#include <okvis/cameras/DoubleSphereCamera.hpp>
 #include <okvis/cameras/EquidistantDistortion.hpp>
+#include <okvis/cameras/NoDistortion.hpp>
 #include <okvis/cameras/PinholeCamera.hpp>
 #include <okvis/cameras/RadialTangentialDistortion.hpp>
 #include <okvis/cameras/RadialTangentialDistortion8.hpp>
@@ -139,6 +141,12 @@ cv::Mat VioVisualizer::drawMatches(VisualizationData::Ptr& data, size_t image_nu
         case okvis::cameras::NCameraSystem::RadialTangential8: {
           if (frame
                   ->geometryAs<okvis::cameras::PinholeCamera<okvis::cameras::RadialTangentialDistortion8>>(image_number)
+                  ->projectHomogeneous(hP_C, &keyframePt) == okvis::cameras::CameraBase::ProjectionStatus::Successful)
+            isVisibleInKeyframe = true;
+          break;
+        }
+        case okvis::cameras::NCameraSystem::NoDistortion: {
+          if (frame->geometryAs<okvis::cameras::DoubleSphereCamera<okvis::cameras::NoDistortion>>(image_number)
                   ->projectHomogeneous(hP_C, &keyframePt) == okvis::cameras::CameraBase::ProjectionStatus::Successful)
             isVisibleInKeyframe = true;
           break;

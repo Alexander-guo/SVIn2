@@ -44,6 +44,7 @@
 #define INCLUDE_OKVIS_FRAMESYNCHRONIZER_HPP_
 
 #include <memory>
+#include <mutex>
 #include <okvis/Measurements.hpp>
 #include <okvis/MultiFrame.hpp>
 #include <okvis/Parameters.hpp>
@@ -143,6 +144,9 @@ class FrameSynchronizer {
   okvis::Time lastCompletedFrameTimestamp_;
   /// ID of the last multiframe that returned true in detectionCompletedForAllCameras().
   uint64_t lastCompletedFrameId_;
+
+  /// Internal mutex to protect frame buffer access from concurrent frontend threads.
+  mutable std::mutex mutex_;
 };
 
 } /* namespace okvis */
