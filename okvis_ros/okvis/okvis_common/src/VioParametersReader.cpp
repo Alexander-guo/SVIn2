@@ -582,7 +582,6 @@ bool VioParametersReader::getCalibrationViaConfig(
         calib.projectionType = "pinhole";
         distortionCoefficientNode = (*it)["distortion_coefficients"];
         calib.distortionType = (std::string)((*it)["distortion_type"]);
-
       }
 
       // extrinsics

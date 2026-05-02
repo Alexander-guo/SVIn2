@@ -162,9 +162,17 @@ bool Parameters::getCalibrationViaConfig(CameraCalibration& calib, cv::FileNode 
     if ((*it).isMap() && (*it)["T_SC"].isSeq() && (*it)["image_dimension"].isSeq() &&
         (*it)["image_dimension"].size() == 2 && (*it)["distortion_coefficients"].isSeq() &&
         (*it)["distortion_coefficients"].size() >= 4 && (*it)["distortion_type"].isString() &&
+        (*it)["projection_type"].isString() && (std::string)((*it)["projection_type"]) == "pinhole" &&
         (*it)["focal_length"].isSeq() && (*it)["focal_length"].size() == 2 && (*it)["principal_point"].isSeq() &&
         (*it)["principal_point"].size() == 2) {
-      LOG(INFO) << "Found calibration in configuration file for camera " << cam_idx;
+      LOG(INFO) << "Found pinhole calibration in configuration file for camera " << cam_idx;
+      got_calibration = true;
+    } else if ((*it).isMap() && (*it)["T_SC"].isSeq() && (*it)["image_dimension"].isSeq() &&
+        (*it)["image_dimension"].size() == 2 && 
+        (*it)["projection_type"].isString() && (std::string)((*it)["projection_type"]) == "double_sphere" &&
+        (*it)["focal_length"].isSeq() && (*it)["focal_length"].size() == 2 && (*it)["principal_point"].isSeq() &&
+        (*it)["principal_point"].size() == 2 && (*it)["xi"].isReal() && (*it)["alpha"].isReal()) {
+      LOG(INFO) << "Found double sphere calibration in configuration file for camera " << cam_idx << ", distortion types is set to \'none\'.";
       got_calibration = true;
     } else {
       LOG(WARNING) << "Found incomplete calibration in configuration file for camera " << cam_idx
@@ -179,9 +187,20 @@ bool Parameters::getCalibrationViaConfig(CameraCalibration& calib, cv::FileNode 
 
     cv::FileNode T_SC_node = (*it)["T_SC"];
     cv::FileNode image_dimension_node = (*it)["image_dimension"];
-    cv::FileNode distortion_coefficient_node = (*it)["distortion_coefficients"];
     cv::FileNode focal_length_node = (*it)["focal_length"];
     cv::FileNode principal_point_node = (*it)["principal_point"];
+
+    cv::FileNode distortion_coefficient_node;
+    if ((std::string)((*it)["projection_type"]) == "double_sphere") {
+      calib.projection_type_ = "double_sphere";
+      calib.double_sphere_params_ << static_cast<double>((*it)["xi"]), static_cast<double>((*it)["alpha"]);
+      distortion_coefficient_node = cv::FileNode(); // Create an empty FileNode for double sphere projection
+      calib.distortion_type_ = "none"; // Set distortion type to "none" for double sphere projection
+    } else {
+      calib.projection_type_ = "pinhole";
+      distortion_coefficient_node = (*it)["distortion_coefficients"];
+      calib.distortion_type_ = (std::string)((*it)["distortion_type"]);
+    }
 
     // extrinsics
     calib.T_imu_cam0_ << T_SC_node[0], T_SC_node[1], T_SC_node[2], T_SC_node[3], T_SC_node[4], T_SC_node[5],
@@ -205,8 +224,6 @@ bool Parameters::getCalibrationViaConfig(CameraCalibration& calib, cv::FileNode 
 
     calib.principal_point_ << principal_point_node[0], principal_point_node[1];
     calib.principal_point_ = calib.principal_point_ * resize_factor_;
-
-    calib.distortion_type_ = (std::string)((*it)["distortion_type"]);
   }
   return got_calibration;
 }

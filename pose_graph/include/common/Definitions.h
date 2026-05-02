@@ -128,15 +128,21 @@ struct CameraCalibration {
   cv::Mat distortion_coefficients_;         ///< Distortion Coefficients.
   Eigen::Vector2d focal_length_;            ///< Focal length.
   Eigen::Vector2d principal_point_;         ///< Principal point.
-  std::string distortion_type_;             ///< Distortion type. ('radialtangential' 'plumb_bob' 'equidistant')
+  std::string distortion_type_;             ///< Distortion type. ('radialtangential' 'plumb_bob' 'equidistant', 'none')
+  std::string projection_type_;            ///< Projection type. ('pinhole', 'double_sphere')
+  Eigen::Vector2d double_sphere_params_; ///< Double sphere model parameters (xi, alpha)
 
   void print() {
     std::cout << "CameraCalibration: " << std::endl;
     std::cout << "T_IMU_Cam0: \n" << T_imu_cam0_ << std::endl;
     std::cout << "Image dimension: " << image_dimension_.transpose() << std::endl;
-    std::cout << "Distortion Coefficients: \n" << distortion_coefficients_ << std::endl;
     std::cout << "Focal length: " << focal_length_.transpose() << std::endl;
     std::cout << "Principal point: " << principal_point_.transpose() << std::endl;
+    std::cout << "Projection type: " << projection_type_ << std::endl;
     std::cout << "Distortion type: " << distortion_type_ << std::endl;
+    std::cout << "Distortion Coefficients: \n" << distortion_coefficients_ << std::endl;
+    if (projection_type_ == "double_sphere") {
+      std::cout << "Double sphere parameters (xi, alpha): " << double_sphere_params_.transpose() << std::endl;
+    }
   }
 };
