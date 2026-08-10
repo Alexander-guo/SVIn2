@@ -135,7 +135,7 @@ bool Frontend::dataAssociationAndInitialization(
     OKVIS_ASSERT_TRUE(
         Exception, distortionType == params.nCameraSystem.distortionType(i), "mixed frame types are not supported yet");
   }
-  int num3dMatches = 0;
+  int numMatchesToKeyframes = 0;
 
   // find camera model (Currently only supports all cameras having the same model. TODO: add support for mixed camera models)
   const std::string cameraModel0 = params.nCameraSystem.cameraGeometry(0)->type();
@@ -164,19 +164,19 @@ bool Frontend::dataAssociationAndInitialization(
     TimerSwitchable matchKeyframesTimer("2.4.1 matchToKeyframes");
     switch (distortionType) {
       case okvis::cameras::NCameraSystem::RadialTangential: {
-        num3dMatches = matchToKeyframes<VioKeyframeWindowMatchingAlgorithm<
+        numMatchesToKeyframes = matchToKeyframes<VioKeyframeWindowMatchingAlgorithm<
             okvis::cameras::PinholeCamera<okvis::cameras::RadialTangentialDistortion> > >(
             estimator, params, framesInOut->id(), rotationOnly, false, &uncertainMatchFraction);
         break;
       }
       case okvis::cameras::NCameraSystem::Equidistant: {
-        num3dMatches = matchToKeyframes<
+        numMatchesToKeyframes = matchToKeyframes<
             VioKeyframeWindowMatchingAlgorithm<okvis::cameras::PinholeCamera<okvis::cameras::EquidistantDistortion> > >(
             estimator, params, framesInOut->id(), rotationOnly, false, &uncertainMatchFraction);
         break;
       }
       case okvis::cameras::NCameraSystem::RadialTangential8: {
-        num3dMatches = matchToKeyframes<VioKeyframeWindowMatchingAlgorithm<
+        numMatchesToKeyframes = matchToKeyframes<VioKeyframeWindowMatchingAlgorithm<
             okvis::cameras::PinholeCamera<okvis::cameras::RadialTangentialDistortion8> > >(
             estimator, params, framesInOut->id(), rotationOnly, false, &uncertainMatchFraction);
         break;
@@ -185,7 +185,7 @@ bool Frontend::dataAssociationAndInitialization(
         OKVIS_ASSERT_TRUE(Exception,
                           isDoubleSphereCameraModel,
                           "NoDistortion is only supported with DoubleSphereCamera in this frontend path.");
-        num3dMatches = matchToKeyframes<
+        numMatchesToKeyframes = matchToKeyframes<
             VioKeyframeWindowMatchingAlgorithm<okvis::cameras::DoubleSphereCamera<okvis::cameras::NoDistortion> > >(
             estimator, params, framesInOut->id(), rotationOnly, false, &uncertainMatchFraction);
         break;
@@ -202,30 +202,32 @@ bool Frontend::dataAssociationAndInitialization(
       }
     }
 
-    if (num3dMatches <= requiredMatches) {
-      LOG(WARNING) << "Tracking failure. Number of 3d2d-matches: " << num3dMatches;
+    if (numMatchesToKeyframes <= requiredMatches) {
+      LOG(WARNING) << "Tracking failure (matching to keyframes). Number of total matches (3D-2D + 2D-2D): "
+                   << numMatchesToKeyframes;
     }
 
     // keyframe decision, at the moment only landmarks that match with keyframe are initialised
     *asKeyframe = *asKeyframe || doWeNeedANewKeyframe(estimator, framesInOut);
 
     // match to last frame
+    int numMatchesToLastFrame = 0;
     TimerSwitchable matchToLastFrameTimer("2.4.2 matchToLastFrame");
     switch (distortionType) {
       case okvis::cameras::NCameraSystem::RadialTangential: {
-        matchToLastFrame<VioKeyframeWindowMatchingAlgorithm<
+        numMatchesToLastFrame = matchToLastFrame<VioKeyframeWindowMatchingAlgorithm<
             okvis::cameras::PinholeCamera<okvis::cameras::RadialTangentialDistortion> > >(
             estimator, params, framesInOut->id(), false);
         break;
       }
       case okvis::cameras::NCameraSystem::Equidistant: {
-        matchToLastFrame<
+        numMatchesToLastFrame = matchToLastFrame<
             VioKeyframeWindowMatchingAlgorithm<okvis::cameras::PinholeCamera<okvis::cameras::EquidistantDistortion> > >(
             estimator, params, framesInOut->id(), false);
         break;
       }
       case okvis::cameras::NCameraSystem::RadialTangential8: {
-        matchToLastFrame<VioKeyframeWindowMatchingAlgorithm<
+        numMatchesToLastFrame = matchToLastFrame<VioKeyframeWindowMatchingAlgorithm<
             okvis::cameras::PinholeCamera<okvis::cameras::RadialTangentialDistortion8> > >(
             estimator, params, framesInOut->id(), false);
 
@@ -235,7 +237,7 @@ bool Frontend::dataAssociationAndInitialization(
         OKVIS_ASSERT_TRUE(Exception,
                           isDoubleSphereCameraModel,
                           "NoDistortion is only supported with DoubleSphereCamera in this frontend path.");
-        matchToLastFrame<
+        numMatchesToLastFrame = matchToLastFrame<
             VioKeyframeWindowMatchingAlgorithm<okvis::cameras::DoubleSphereCamera<okvis::cameras::NoDistortion> > >(
             estimator, params, framesInOut->id(), false);
         break;
@@ -243,6 +245,15 @@ bool Frontend::dataAssociationAndInitialization(
       default:
         OKVIS_THROW(Exception, "Unsupported distortion type.")
         break;
+    }
+
+    if (numMatchesToLastFrame <= requiredMatches && estimator.numFrames() >= 2) {
+        if (estimator.isKeyframe(estimator.frameIdByAge(1))) {
+          LOG(WARNING) << "Skip to match to last frame. Last frame is a keyframe.";
+        } else {
+          LOG(WARNING) << "Tracking failure (matching to last frame). Number of total matches (3D-2D + 2D-2D): "
+                       << numMatchesToLastFrame;
+        }
     }
     matchToLastFrameTimer.stop();
   } else {
@@ -395,6 +406,7 @@ int Frontend::matchToKeyframes(okvis::Estimator& estimator,
   int numUncertainMatches = 0;
 
   // go through all the frames and try to match the initialized keypoints
+  // 3D2D matching with keyframes
   size_t kfcounter = 0;
   for (size_t age = 1; age < estimator.numFrames(); ++age) {
     uint64_t olderFrameId = estimator.frameIdByAge(age);
@@ -467,6 +479,8 @@ int Frontend::matchToLastFrame(okvis::Estimator& estimator,
                                bool removeOutliers) {
   if (estimator.numFrames() < 2) {
     // just starting, so yes, we need this as a new keyframe
+    LOG(WARNING) << "Not enough frames to match to last frame. Estimator has " << estimator.numFrames()
+                 << " frames.";
     return 0;
   }
 
@@ -474,6 +488,7 @@ int Frontend::matchToLastFrame(okvis::Estimator& estimator,
 
   if (estimator.isKeyframe(lastFrameId)) {
     // already done
+    // LOG(WARNING) << "Last frame is a keyframe. Not matching to last frame.";
     return 0;
   }
 
@@ -487,6 +502,7 @@ int Frontend::matchToLastFrame(okvis::Estimator& estimator,
     // match 3D-2D
     matcher_->match<MATCHING_ALGORITHM>(matchingAlgorithm);
     retCtr += matchingAlgorithm.numMatches();
+    // LOG(INFO) << "Number of matches to last frame (3D-2D): " << matchingAlgorithm.numMatches();
   }
 
   runRansac3d2d(estimator, params.nCameraSystem, estimator.multiFrame(currentFrameId), removeOutliers);
@@ -499,6 +515,7 @@ int Frontend::matchToLastFrame(okvis::Estimator& estimator,
     // match 2D-2D for initialization of new (mono-)correspondences
     matcher_->match<MATCHING_ALGORITHM>(matchingAlgorithm);
     retCtr += matchingAlgorithm.numMatches();
+    // LOG(INFO) << "Number of matches to last frame (2D-2D): " << matchingAlgorithm.numMatches();
   }
 
   // remove outliers

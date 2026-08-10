@@ -281,11 +281,15 @@ bool ThreadedKFVio::addImage(const okvis::Time& stamp,
   }
 
   if (blocking_) {
-    cameraMeasurementsReceived_[cameraIndex]->PushBlockingIfFull(frame, 1);
-    return true;
+    return cameraMeasurementsReceived_[cameraIndex]->PushBlockingIfFull(frame, 1);
+    // return true;
   } else {
-    cameraMeasurementsReceived_[cameraIndex]->PushNonBlockingDroppingIfFull(frame, max_camera_input_queue_size);
-    return cameraMeasurementsReceived_[cameraIndex]->Size() == 1;
+    if (cameraMeasurementsReceived_[cameraIndex]->PushNonBlockingDroppingIfFull(frame, max_camera_input_queue_size)) {
+      DLOG(WARNING) << "oldest in the queue frame dropped";
+      return false;
+    }
+    // return cameraMeasurementsReceived_[cameraIndex]->Size() == 1;
+    return true;
   }
 }
 
@@ -602,9 +606,11 @@ void ThreadedKFVio::frameConsumerLoop(size_t cameraIndex) {
     }
     okvis::kinematics::Transformation T_WC = T_WS * (*parameters_.nCameraSystem.T_SC(frame->sensorId));
     beforeDetectTimer.stop();
+
     detectTimer.start();
     frontend_.detectAndDescribe(frame->sensorId, multiFrame, T_WC, nullptr);
     detectTimer.stop();
+
     afterDetectTimer.start();
 
     bool push = false;
