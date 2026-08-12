@@ -71,3 +71,24 @@ TEST(DoubleSphereCamera, functions) {
     EXPECT_TRUE((J_numDiff_intrinsics - J_intrinsics).norm() < 0.001);
   }
 }
+
+TEST(DoubleSphereCamera, backProjectHomogeneous) {
+  auto camera = okvis::cameras::DoubleSphereCamera<okvis::cameras::NoDistortion>::createTestObject();
+  const Eigen::Vector2d imagePoint = camera->createRandomImagePoint();
+
+  Eigen::Vector3d ray;
+  ASSERT_TRUE(camera->backProject(imagePoint, &ray));
+
+  Eigen::Vector4d homogeneousDirection = Eigen::Vector4d::Constant(-1.0);
+  ASSERT_TRUE(camera->backProjectHomogeneous(imagePoint, &homogeneousDirection));
+  EXPECT_TRUE(homogeneousDirection.head<3>().isApprox(ray));
+  EXPECT_DOUBLE_EQ(homogeneousDirection[3], 1.0);
+
+  Eigen::Vector4d homogeneousDirectionWithJacobian = Eigen::Vector4d::Constant(-1.0);
+  Eigen::Matrix<double, 4, 2> homogeneousJacobian = Eigen::Matrix<double, 4, 2>::Constant(-1.0);
+  ASSERT_TRUE(camera->backProjectHomogeneous(
+      imagePoint, &homogeneousDirectionWithJacobian, &homogeneousJacobian));
+  EXPECT_TRUE(homogeneousDirectionWithJacobian.head<3>().isApprox(ray));
+  EXPECT_DOUBLE_EQ(homogeneousDirectionWithJacobian[3], 1.0);
+  EXPECT_TRUE(homogeneousJacobian.row(3).isZero());
+}
