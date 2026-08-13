@@ -591,7 +591,18 @@ bool VioParametersReader::getCalibrationViaConfig(
           T_SC_node[14], T_SC_node[15];
       calib.T_SC = okvis::kinematics::Transformation(T_SC);
 
-      calib.imageDimension << imageDimensionNode[0], imageDimensionNode[1];
+      const Eigen::Vector2d originalImageDimension(
+          static_cast<double>(imageDimensionNode[0]), static_cast<double>(imageDimensionNode[1]));
+      // Keep the camera geometry consistent with Subscriber::imageCallback(),
+      // where cv::resize computes the output size by rounding the source
+      // dimensions multiplied by resizeFactor.
+      calib.imageDimension << cvRound(originalImageDimension[0] * vioParameters_.miscParams.resizeFactor),
+          cvRound(originalImageDimension[1] * vioParameters_.miscParams.resizeFactor);
+      OKVIS_ASSERT_TRUE(Exception,
+                        calib.imageDimension[0] > 0.0 && calib.imageDimension[1] > 0.0,
+                        "resizeFactor produces a non-positive camera image dimension.");
+      LOG(INFO) << "image_dimension: " << originalImageDimension.transpose() << " -> "
+                << calib.imageDimension.transpose();
 
       calib.distortionCoefficients.resize(distortionCoefficientNode.size());
       for (size_t i = 0; i < distortionCoefficientNode.size(); ++i) {
