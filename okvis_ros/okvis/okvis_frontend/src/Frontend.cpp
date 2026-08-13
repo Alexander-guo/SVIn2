@@ -79,7 +79,7 @@ Frontend::Frontend(size_t numCameras)
       briskDescriptionRotationInvariance_(true),
       briskDescriptionScaleInvariance_(false),
       briskMatchingThreshold_(60.0),
-      matcher_(std::unique_ptr<okvis::DenseMatcher>(new okvis::DenseMatcher(4))),
+      matcher_(std::unique_ptr<okvis::DenseMatcher>(new okvis::DenseMatcher(4))), //TODO(Guo): consider make matcher thread num configurable
       keyframeInsertionOverlapThreshold_(0.6),
       keyframeInsertionMatchingRatioThreshold_(0.2) {
   // create mutexes for feature detectors and descriptor extractors
@@ -249,7 +249,7 @@ bool Frontend::dataAssociationAndInitialization(
 
     if (numMatchesToLastFrame <= requiredMatches && estimator.numFrames() >= 2) {
         if (estimator.isKeyframe(estimator.frameIdByAge(1))) {
-          LOG(WARNING) << "Skip to match to last frame. Last frame is a keyframe.";
+          // LOG(WARNING) << "Skip to match to last frame. Last frame is a keyframe.";
         } else {
           LOG(WARNING) << "Tracking failure (matching to last frame). Number of total matches (3D-2D + 2D-2D): "
                        << numMatchesToLastFrame;

@@ -11,8 +11,22 @@ cameras:
         alpha: 0.6831017255310529, # double sphere alpha parameter
     #    distortion_coefficients: [0, 0, 0, 0], # double sphere model does not use distortion coefficients
     #    distortion_type: none,
-        focal_length: [244.1628281634585, 245.06462724291987], 
-        principal_point: [421.27176788834316, 420.608742357202]} 
+       focal_length: [244.1628281634585, 245.06462724291987], 
+       principal_point: [421.27176788834316, 420.608742357202]} 
+
+    - {T_SC:
+        [0.0025475,   0.01573301,  0.99987298,  0.01142023,
+        0.99992865, -0.01170954, -0.00236339, -0.01450555,
+        0.01167087,  0.99980766, -0.01576172, -0.02031563,
+        0.0, 0.0, 0.0, 1.0],
+        image_dimension: [832, 832],
+        projection_type: double_sphere,
+        xi: 0.014379153239762127, # double sphere xi parameter
+        alpha: 0.6864870568393587, # double sphere alpha parameter
+    #    distortion_coefficients: [0, 0, 0, 0], # double sphere model does not use distortion coefficients
+    #    distortion_type: none,
+       focal_length: [245.3211158993786, 246.35906171785095], 
+       principal_point: [415.00183901843747, 407.9706681361295]} 
 
 camera_params:
     camera_rate: 30
@@ -20,6 +34,7 @@ camera_params:
     sigma_absolute_orientation: 0
     sigma_c_relative_translation: 0.0 # below 1.0e-6 ruines numerics...
     sigma_c_relative_orientation: 0.0 # below 1.0e-6 ruines numerics...
+    timestamp_tolerance: 0.010 # [s] stereo frame out-of-sync tolerance, max is 0.5/camera_rate
 
 
 imu_params:
@@ -34,7 +49,7 @@ imu_params:
     tau: 3600.0 # reversion time constant, currently not in use [s]
     g: 9.807 # Earth's acceleration due to gravity [m/s^2]
     a0: [ 0.0, 0.0, 0.0 ] # Accelerometer bias [m/s^2]
-    imu_rate: 1000 # will be used to define IMU queue capacity
+    imu_rate: 1000
     # tranform Body-Sensor (IMU)
     T_BS:
         [1.0, 0.0, 0.0, 0.0,
@@ -54,12 +69,12 @@ ceres_options:
 
 # detection
 detection_options:
-    threshold: 30.0      # detection threshold. By default the uniformity radius in pixels
+    threshold: 40.0      # detection threshold. By default the uniformity radius in pixels
     octaves: 0           # number of octaves for detection. 0 means single-scale at highest resolution
-    maxNoKeypoints: 400  # restrict to a maximum of this many keypoints per image (strongest ones)   #Sharmin
+    maxNoKeypoints: 150  # restrict to a maximum of this many keypoints per image (strongest ones)   #Sharmin
 
 # delay of images [s]:
-imageDelay: 0.010222609514168871  # in case you are using a custom setup, you will have to calibrate this. 0 for the VISensor. t_cam - imageDelay = t_imu
+imageDelay: 0.011351271099877698  # in case you are using a custom setup, you will have to calibrate this. 0 for the VISensor. t_cam - imageDelay = t_imu
 
 # display debug images?
 displayImages: false  # displays debug video and keyframe matches. May be slow.
@@ -96,7 +111,7 @@ loop_closure_params:
     enable: 1  
     min_correspondences: 35 #Minimum 2D to 3D correspondences required for loop closure
     #decrease for more loop closure, might result in false loop closure (20 to 40)
-    pnp_reprojection_threshold: 15.0 #Reprojection threshold for PnP RANSAC
+    pnp_reprojection_threshold: 10.0 #Reprojection threshold for PnP RANSAC
     #increase for more loop closure, might result in false loop closure (8 to 30)
     pnp_ransac_iterations: 100  #Number of iterations for PnP RANSAC
     keyframe_queue: 10 #Use 1 for real-time on robot. Something around 5-10 could be ideal. -1 not to skip keyframes at all.

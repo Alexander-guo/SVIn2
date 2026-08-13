@@ -27,7 +27,8 @@ def launch_setup(context, *args, **kwargs):
     }],
     remappings=[
       ('/camera0', '/cam0/image_raw'),
-      ('/imu', '/gopro/imu')
+      ('/camera1', '/cam1/image_raw'),
+      ('/imu', '/insta360/imu')
     ]
   )
 
@@ -49,7 +50,7 @@ def launch_setup(context, *args, **kwargs):
     name='rviz',
     arguments=['-d', os.path.join(
       FindPackageShare('okvis_ros').perform(context),
-      'rviz_config/svin.rviz')],
+      'rviz_config/svin_multicam.rviz')],
     output='screen'
   )
 
@@ -63,30 +64,42 @@ def generate_launch_description():
     default_value=PathJoinSubstitution([
       FindPackageShare('okvis_ros'),
       'config',
-      'config_gopro13_uw.yaml'
+      'config_insta360X5_dual_ds_air.yaml'
     ])
   )
 
   use_pose_graph_arg = DeclareLaunchArgument(
     'use_pose_graph',
-    default_value='true'
+    default_value='false'
   )
 
-  # Uncompressor node
-  uncompressor_node = Node(
+   # Uncompressor nodes
+  front_uncompressor_node = Node(
     package='okvis_ros',
     executable='uncompress_image',
-    name='uncompressor',
+    name='front_uncompressor',
     output='screen',
     parameters=[{
-      'compressed_img_topic': '/gopro/image_raw/compressed',
+      'compressed_img_topic': '/insta360/front/image_raw/compressed',
       'ouput_img_topic': '/cam0/image_raw'
+    }]
+  )
+
+  rear_uncompressor_node = Node(
+    package='okvis_ros',
+    executable='uncompress_image',
+    name='rear_uncompressor',
+    output='screen',
+    parameters=[{
+      'compressed_img_topic': '/insta360/rear/image_raw/compressed',
+      'ouput_img_topic': '/cam1/image_raw'
     }]
   )
 
   return LaunchDescription([
     config_arg,
     use_pose_graph_arg,
-    uncompressor_node,
+    front_uncompressor_node,
+    rear_uncompressor_node,
     OpaqueFunction(function=launch_setup)
   ])

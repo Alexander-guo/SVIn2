@@ -69,8 +69,6 @@ if(BUILD_TESTS)
     ${PROJECT_NAME} 
       gtest
       gtest_main
-      gmock
-      gmock_main 
     pthread)
   add_test(test ${PROJECT_TEST_NAME})
 endif()

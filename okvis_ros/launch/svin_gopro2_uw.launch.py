@@ -1,5 +1,6 @@
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction
+from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch.substitutions import ThisLaunchFileDir
@@ -35,6 +36,7 @@ def launch_setup(context, *args, **kwargs):
     package='pose_graph',
     executable='pose_graph_node',
     name='pose_graph_node',
+    condition=IfCondition(LaunchConfiguration('use_pose_graph')),
     parameters=[{
       'config_file': abs_okvis_config_path
     }]
@@ -65,6 +67,11 @@ def generate_launch_description():
     ])
   )
 
+  use_pose_graph_arg = DeclareLaunchArgument(
+    'use_pose_graph',
+    default_value='true'
+  )
+
   # Uncompressor node
   uncompressor_node = Node(
     package='okvis_ros',
@@ -79,6 +86,7 @@ def generate_launch_description():
 
   return LaunchDescription([
     config_arg,
+    use_pose_graph_arg,
     uncompressor_node,
     OpaqueFunction(function=launch_setup)
   ])

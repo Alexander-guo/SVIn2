@@ -67,6 +67,12 @@ if(BUILD_TESTS)
     add_definitions(-DGTEST_HAS_TR1_TUPLE=1)
   else()
     add_definitions(-DGTEST_HAS_TR1_TUPLE=1)
+  endif(APPLE)
+
+  find_library(GMOCK_LIBRARY NAMES gmock)
+  find_library(GMOCK_MAIN_LIBRARY NAMES gmock_main)
+
+  if(GMOCK_LIBRARY AND GMOCK_MAIN_LIBRARY)
     enable_testing()
     set(PROJECT_TEST_NAME ${PROJECT_NAME}_test)
     add_executable(${PROJECT_TEST_NAME}
@@ -88,6 +94,8 @@ if(BUILD_TESTS)
       ${OpenCV_LIBRARIES}
       pthread)
     add_test(test ${PROJECT_TEST_NAME} )
-  endif(APPLE)
+  else()
+    message(STATUS "Skipping ${PROJECT_NAME} tests because gmock was not found.")
+  endif()
 endif()
 

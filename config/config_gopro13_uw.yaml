@@ -6,6 +6,7 @@ cameras:
            0.007916851305584298, -0.9999587747897482, -0.004446592672319036, -0.022025982898190858,
            0.0, 0.0, 0.0, 1.0],
         image_dimension: [ 960, 540 ],
+        projection_type: pinhole,
         distortion_coefficients: [-0.10984983828690566, 0.10600669194280174, 0.0017155029931461923, -0.0032591922911890028],
         distortion_type: radialtangential,
         focal_length: [585.1458698638675, 585.7832726372784], #projection matrix as pre-rectified images have been used
@@ -82,7 +83,7 @@ detection_options:
 imageDelay: 0.0  # in case you are using a custom setup, you will have to calibrate this. 0 for the VISensor.
 
 # display debug images?
-displayImages: true  # displays debug video and keyframe matches. May be slow.
+displayImages: false  # displays debug video and keyframe matches. May be slow.
 
 # use direct driver
 useDriver: false
@@ -136,5 +137,5 @@ global_map_params:
 
 output_params:
     debug: 1
-    output_dir: ~/ros_ws/src/SVIn/pose_graph # not in use
+    output_dir: ../pose_graph 
     # does not detect ~, so full path is needed if the path is not detected, /tmp is used a default

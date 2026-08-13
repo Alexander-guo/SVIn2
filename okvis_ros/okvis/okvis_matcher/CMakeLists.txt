@@ -41,8 +41,6 @@ if(BUILD_TESTS)
     ${PROJECT_NAME} 
       gtest
       gtest_main
-      gmock
-      gmock_main
     ${GLOG_LIBRARY}
     pthread
   )
