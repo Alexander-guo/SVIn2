@@ -7,6 +7,7 @@
 
 #include <vector>
 #include <cmath>
+#include <limits>
 #include "okvis/cameras/DoubleSphereCamera.hpp"
 
 // \brief okvis Main namespace of this package.
@@ -415,6 +416,10 @@ void DoubleSphereCamera<DISTORTION_T>::projectBatch(const Eigen::Matrix3Xd& poin
 template <class DISTORTION_T>
 CameraBase::ProjectionStatus DoubleSphereCamera<DISTORTION_T>::projectHomogeneous(const Eigen::Vector4d& point,
                                                                                   Eigen::Vector2d* imagePoint) const {
+  if (!point.allFinite() || point.head<3>().squaredNorm() < 1.0e-24) {
+    *imagePoint = Eigen::Vector2d::Constant(std::numeric_limits<double>::quiet_NaN());
+    return CameraBase::ProjectionStatus::Invalid;
+  }
   Eigen::Vector3d head = point.head<3>();
   if (point[3] < 0) {
     return project(-head, imagePoint);
@@ -430,6 +435,15 @@ CameraBase::ProjectionStatus DoubleSphereCamera<DISTORTION_T>::projectHomogeneou
     Eigen::Vector2d* imagePoint,
     Eigen::Matrix<double, 2, 4>* pointJacobian,
     Eigen::Matrix2Xd* intrinsicsJacobian) const {
+  if (!point.allFinite() || point.head<3>().squaredNorm() < 1.0e-24) {
+    *imagePoint = Eigen::Vector2d::Constant(std::numeric_limits<double>::quiet_NaN());
+    pointJacobian->setZero();
+    if (intrinsicsJacobian) {
+      intrinsicsJacobian->resize(2, NumIntrinsics);
+      intrinsicsJacobian->setZero();
+    }
+    return CameraBase::ProjectionStatus::Invalid;
+  }
   Eigen::Vector3d head = point.head<3>();
   Eigen::Matrix<double, 2, 3> pointJacobian3;
   CameraBase::ProjectionStatus status;
@@ -451,6 +465,17 @@ CameraBase::ProjectionStatus DoubleSphereCamera<DISTORTION_T>::projectHomogeneou
     Eigen::Vector2d* imagePoint,
     Eigen::Matrix<double, 2, 4>* pointJacobian,
     Eigen::Matrix2Xd* intrinsicsJacobian) const {
+  if (!point.allFinite() || point.head<3>().squaredNorm() < 1.0e-24) {
+    *imagePoint = Eigen::Vector2d::Constant(std::numeric_limits<double>::quiet_NaN());
+    if (pointJacobian) {
+      pointJacobian->setZero();
+    }
+    if (intrinsicsJacobian) {
+      intrinsicsJacobian->resize(2, NumIntrinsics);
+      intrinsicsJacobian->setZero();
+    }
+    return CameraBase::ProjectionStatus::Invalid;
+  }
   Eigen::Vector3d head = point.head<3>();
   Eigen::Matrix<double, 2, 3> pointJacobian3;
   CameraBase::ProjectionStatus status;

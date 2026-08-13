@@ -92,3 +92,34 @@ TEST(DoubleSphereCamera, backProjectHomogeneous) {
   EXPECT_DOUBLE_EQ(homogeneousDirectionWithJacobian[3], 1.0);
   EXPECT_TRUE(homogeneousJacobian.row(3).isZero());
 }
+
+TEST(DoubleSphereCamera, rejectsInvalidHomogeneousPoint) {
+  auto camera = okvis::cameras::DoubleSphereCamera<okvis::cameras::NoDistortion>::createTestObject();
+  const auto invalid = okvis::cameras::CameraBase::ProjectionStatus::Invalid;
+  const Eigen::Vector4d zeroPoint = Eigen::Vector4d::Zero();
+
+  Eigen::Vector2d imagePoint = Eigen::Vector2d::Zero();
+  EXPECT_EQ(camera->projectHomogeneous(zeroPoint, &imagePoint), invalid);
+  EXPECT_FALSE(imagePoint.allFinite());
+
+  Eigen::Matrix<double, 2, 4> pointJacobian = Eigen::Matrix<double, 2, 4>::Ones();
+  Eigen::Matrix2Xd intrinsicsJacobian = Eigen::Matrix2Xd::Ones(2, camera->noIntrinsicsParameters());
+  EXPECT_EQ(camera->projectHomogeneous(zeroPoint, &imagePoint, &pointJacobian, &intrinsicsJacobian), invalid);
+  EXPECT_FALSE(imagePoint.allFinite());
+  EXPECT_TRUE(pointJacobian.isZero());
+  EXPECT_TRUE(intrinsicsJacobian.isZero());
+
+  Eigen::VectorXd intrinsics;
+  camera->getIntrinsics(intrinsics);
+  pointJacobian.setOnes();
+  intrinsicsJacobian.setOnes();
+  EXPECT_EQ(camera->projectHomogeneousWithExternalParameters(
+                zeroPoint, intrinsics, &imagePoint, &pointJacobian, &intrinsicsJacobian),
+            invalid);
+  EXPECT_FALSE(imagePoint.allFinite());
+  EXPECT_TRUE(pointJacobian.isZero());
+  EXPECT_TRUE(intrinsicsJacobian.isZero());
+
+  const Eigen::Vector4d zeroDirectionWithFiniteScale(0.0, 0.0, 0.0, 1.0);
+  EXPECT_EQ(camera->projectHomogeneous(zeroDirectionWithFiniteScale, &imagePoint), invalid);
+}
