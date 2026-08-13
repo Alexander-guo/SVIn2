@@ -52,6 +52,7 @@ class Parameters {
 
   // The first camera in the camera is used as refrence
   CameraCalibration camera_calibration_;
+  std::vector<CameraCalibration, Eigen::aligned_allocator<CameraCalibration>> camera_calibrations_;
 
   bool debug_mode_ = false;
   std::string output_path_;
@@ -71,4 +72,6 @@ class Parameters {
  public:
   void loadParameters(const std::string& config_file);
   bool getCalibrationViaConfig(CameraCalibration& calibration, cv::FileNode camera_node);
+  bool getCalibrationViaConfig(std::vector<CameraCalibration, Eigen::aligned_allocator<CameraCalibration>>& calibrations,
+                               cv::FileNode camera_node);
 };

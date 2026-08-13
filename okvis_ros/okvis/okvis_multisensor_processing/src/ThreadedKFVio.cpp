@@ -1092,6 +1092,7 @@ void ThreadedKFVio::optimizationLoop() {
       std::lock_guard<std::mutex> l(estimator_mutex_);
       optimizationTimer.start();
       // if(frontend_.isInitialized()){
+      //TODO(GUO): make this num of threads for optimization configurable
       estimator_.optimize(parameters_.optimization.max_iterations, 2, false);
       //}
       /*if (estimator_.numFrames() > 0 && !frontend_.isInitialized()){
