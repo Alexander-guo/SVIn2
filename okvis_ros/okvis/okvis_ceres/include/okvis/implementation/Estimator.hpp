@@ -69,7 +69,13 @@ template <class GEOMETRY_TYPE>
   // create error term
   std::shared_ptr<ceres::ReprojectionError<GEOMETRY_TYPE>> reprojectionError(
       new ceres::ReprojectionError<GEOMETRY_TYPE>(
-          multiFramePtr->template geometryAs<GEOMETRY_TYPE>(camIdx), camIdx, measurement, information));
+          multiFramePtr->template geometryAs<GEOMETRY_TYPE>(camIdx),
+          camIdx,
+          measurement,
+          information,
+          landmarkId,
+          poseId,
+          keypointIdx));
 
   ::ceres::ResidualBlockId retVal = mapPtr_->addResidualBlock(
       reprojectionError,
@@ -131,7 +137,13 @@ template <class GEOMETRY_TYPE>
   // create error term
   std::shared_ptr<ceres::ReprojectionError<GEOMETRY_TYPE>> reprojectionError(
       new ceres::ReprojectionError<GEOMETRY_TYPE>(
-          multiFramePtr->template geometryAs<GEOMETRY_TYPE>(camIdx), camIdx, measurement, information));
+          multiFramePtr->template geometryAs<GEOMETRY_TYPE>(camIdx),
+          camIdx,
+          measurement,
+          information,
+          landmarkId,
+          poseId,
+          keypointIdx));
   std::cout << "Reloc: created error term" << std::endl;
 
   ::ceres::ResidualBlockId retVal = mapPtr_->addResidualBlock(

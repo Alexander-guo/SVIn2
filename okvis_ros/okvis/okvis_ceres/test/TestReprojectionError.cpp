@@ -32,6 +32,8 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
+#include <limits>
 #include <memory>
 #include <okvis/FrameTypedefs.hpp>
 #include <okvis/Time.hpp>
@@ -48,6 +50,170 @@
 
 #include "ceres/ceres.h"
 #include "glog/logging.h"
+
+namespace {
+
+class ControllableCameraGeometry {
+ public:
+  using ProjectionStatus = okvis::cameras::CameraBase::ProjectionStatus;
+
+  ControllableCameraGeometry(ProjectionStatus status, bool finiteOutput)
+      : status_(status), finiteOutput_(finiteOutput) {}
+
+  ProjectionStatus projectHomogeneous(const Eigen::Vector4d&, Eigen::Vector2d* imagePoint) const {
+    setProjection(imagePoint, nullptr);
+    return status_;
+  }
+
+  ProjectionStatus projectHomogeneous(const Eigen::Vector4d&,
+                                       Eigen::Vector2d* imagePoint,
+                                       Eigen::Matrix<double, 2, 4>* pointJacobian) const {
+    setProjection(imagePoint, pointJacobian);
+    return status_;
+  }
+
+  void getIntrinsics(Eigen::VectorXd& intrinsics) const {
+    intrinsics.resize(6);
+    intrinsics << 200.0, 200.0, 320.0, 320.0, 0.0, 0.6;
+  }
+
+  uint32_t imageWidth() const { return 640; }
+  uint32_t imageHeight() const { return 640; }
+  void setProjectionStatus(ProjectionStatus status) { status_ = status; }
+
+ private:
+  void setProjection(Eigen::Vector2d* imagePoint, Eigen::Matrix<double, 2, 4>* pointJacobian) const {
+    if (finiteOutput_) {
+      *imagePoint << 4.0, 5.0;
+      if (pointJacobian != nullptr) {
+        pointJacobian->setConstant(0.25);
+      }
+      return;
+    }
+
+    imagePoint->setConstant(std::numeric_limits<double>::quiet_NaN());
+    if (pointJacobian != nullptr) {
+      pointJacobian->setConstant(std::numeric_limits<double>::quiet_NaN());
+    }
+  }
+
+  ProjectionStatus status_;
+  bool finiteOutput_;
+};
+
+void expectZeroReprojectionFactor(ControllableCameraGeometry::ProjectionStatus status, bool finiteOutput) {
+  auto cameraGeometry = std::make_shared<const ControllableCameraGeometry>(status, finiteOutput);
+  const Eigen::Vector2d measurement(10.0, 20.0);
+  const Eigen::Matrix2d information = Eigen::Matrix2d::Identity();
+  okvis::ceres::ReprojectionError<ControllableCameraGeometry> error(
+      cameraGeometry, 0, measurement, information);
+
+  const std::array<double, 7> pose = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0};
+  const std::array<double, 4> point = {0.0, 0.0, 1.0, 1.0};
+  const std::array<double, 7> extrinsics = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0};
+  const double* parameters[3] = {pose.data(), point.data(), extrinsics.data()};
+
+  std::array<double, 2> residuals = {9.0, 9.0};
+  EXPECT_TRUE(error.Evaluate(parameters, residuals.data(), nullptr));
+  EXPECT_DOUBLE_EQ(residuals[0], 0.0);
+  EXPECT_DOUBLE_EQ(residuals[1], 0.0);
+
+  std::array<double, 14> J0;
+  std::array<double, 8> J1;
+  std::array<double, 14> J2;
+  std::array<double, 12> J0Minimal;
+  std::array<double, 6> J1Minimal;
+  std::array<double, 12> J2Minimal;
+  J0.fill(9.0);
+  J1.fill(9.0);
+  J2.fill(9.0);
+  J0Minimal.fill(9.0);
+  J1Minimal.fill(9.0);
+  J2Minimal.fill(9.0);
+  double* jacobians[3] = {J0.data(), J1.data(), J2.data()};
+  double* jacobiansMinimal[3] = {J0Minimal.data(), J1Minimal.data(), J2Minimal.data()};
+
+  residuals = {9.0, 9.0};
+  EXPECT_TRUE(error.EvaluateWithMinimalJacobians(
+      parameters, residuals.data(), jacobians, jacobiansMinimal));
+  EXPECT_DOUBLE_EQ(residuals[0], 0.0);
+  EXPECT_DOUBLE_EQ(residuals[1], 0.0);
+  for (double value : J0) EXPECT_DOUBLE_EQ(value, 0.0);
+  for (double value : J1) EXPECT_DOUBLE_EQ(value, 0.0);
+  for (double value : J2) EXPECT_DOUBLE_EQ(value, 0.0);
+  for (double value : J0Minimal) EXPECT_DOUBLE_EQ(value, 0.0);
+  for (double value : J1Minimal) EXPECT_DOUBLE_EQ(value, 0.0);
+  for (double value : J2Minimal) EXPECT_DOUBLE_EQ(value, 0.0);
+}
+
+}  // namespace
+
+TEST(okvisTestSuite, ReprojectionErrorDeactivatesInvalidProjections) {
+  using ProjectionStatus = okvis::cameras::CameraBase::ProjectionStatus;
+  expectZeroReprojectionFactor(ProjectionStatus::Behind, true);
+  expectZeroReprojectionFactor(ProjectionStatus::Invalid, true);
+  expectZeroReprojectionFactor(ProjectionStatus::Masked, true);
+  expectZeroReprojectionFactor(ProjectionStatus::OutsideImage, true);
+  expectZeroReprojectionFactor(ProjectionStatus::Successful, false);
+}
+
+TEST(okvisTestSuite, ReprojectionErrorPreservesSuccessfulProjection) {
+  using ProjectionStatus = okvis::cameras::CameraBase::ProjectionStatus;
+  auto cameraGeometry =
+      std::make_shared<const ControllableCameraGeometry>(ProjectionStatus::Successful, true);
+  okvis::ceres::ReprojectionError<ControllableCameraGeometry> error(
+      cameraGeometry, 0, Eigen::Vector2d(10.0, 20.0), Eigen::Matrix2d::Identity());
+
+  const std::array<double, 7> pose = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0};
+  const std::array<double, 4> point = {0.0, 0.0, 1.0, 1.0};
+  const std::array<double, 7> extrinsics = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0};
+  const double* parameters[3] = {pose.data(), point.data(), extrinsics.data()};
+  std::array<double, 2> residuals = {0.0, 0.0};
+
+  EXPECT_TRUE(error.Evaluate(parameters, residuals.data(), nullptr));
+  EXPECT_DOUBLE_EQ(residuals[0], 6.0);
+  EXPECT_DOUBLE_EQ(residuals[1], 15.0);
+}
+
+TEST(okvisTestSuite, ReprojectionErrorTracksObservationIdentityAndActiveState) {
+  using Camera = ControllableCameraGeometry;
+  using Error = okvis::ceres::ReprojectionError<Camera>;
+  using ProjectionStatus = okvis::cameras::CameraBase::ProjectionStatus;
+  auto cameraGeometry = std::make_shared<Camera>(ProjectionStatus::Successful, true);
+  const uint64_t activeBefore = Error::activeFactorCount();
+  const uint64_t deactivatedBefore = Error::deactivatedFactorCount();
+
+  {
+    Error error(cameraGeometry,
+                2,
+                Eigen::Vector2d(10.0, 20.0),
+                Eigen::Matrix2d::Identity(),
+                101,
+                202,
+                303);
+    EXPECT_EQ(error.landmarkId(), 101);
+    EXPECT_EQ(error.frameId(), 202);
+    EXPECT_EQ(error.keypointId(), 303);
+
+    const std::array<double, 7> pose = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0};
+    const std::array<double, 4> point = {0.0, 0.0, 1.0, 1.0};
+    const std::array<double, 7> extrinsics = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0};
+    const double* parameters[3] = {pose.data(), point.data(), extrinsics.data()};
+    std::array<double, 2> residuals{};
+
+    ASSERT_TRUE(error.Evaluate(parameters, residuals.data(), nullptr));
+    EXPECT_EQ(Error::activeFactorCount(), activeBefore + 1);
+    EXPECT_EQ(Error::deactivatedFactorCount(), deactivatedBefore);
+
+    cameraGeometry->setProjectionStatus(ProjectionStatus::Behind);
+    ASSERT_TRUE(error.Evaluate(parameters, residuals.data(), nullptr));
+    EXPECT_EQ(Error::activeFactorCount(), activeBefore);
+    EXPECT_EQ(Error::deactivatedFactorCount(), deactivatedBefore + 1);
+  }
+
+  EXPECT_EQ(Error::activeFactorCount(), activeBefore);
+  EXPECT_EQ(Error::deactivatedFactorCount(), deactivatedBefore);
+}
 
 TEST(okvisTestSuite, ReprojectionError) {
   // initialize random number generator

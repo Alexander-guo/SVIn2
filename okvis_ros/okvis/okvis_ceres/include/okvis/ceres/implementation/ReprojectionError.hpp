@@ -36,7 +36,11 @@
  * @author Stefan Leutenegger
  */
 
+#include <atomic>
+#include <limits>
 #include <memory>
+#include <glog/logging.h>
+#include <okvis/cameras/CameraBase.hpp>
 #include <okvis/kinematics/Transformation.hpp>
 #include <okvis/kinematics/operators.hpp>
 
@@ -54,11 +58,55 @@ template <class GEOMETRY_T>
 ReprojectionError<GEOMETRY_T>::ReprojectionError(std::shared_ptr<const camera_geometry_t> cameraGeometry,
                                                  uint64_t cameraId,
                                                  const measurement_t& measurement,
-                                                 const covariance_t& information) {
+                                                 const covariance_t& information,
+                                                 uint64_t landmarkId,
+                                                 uint64_t frameId,
+                                                 size_t keypointId)
+    : landmarkId_(landmarkId), frameId_(frameId), keypointId_(keypointId) {
   setCameraId(cameraId);
   setMeasurement(measurement);
   setInformation(information);
   setCameraGeometry(cameraGeometry);
+}
+
+template <class GEOMETRY_T>
+ReprojectionError<GEOMETRY_T>::~ReprojectionError() {
+  if (!isRegisteredObservation()) return;
+  const EvaluationState state = evaluationState_.load(std::memory_order_relaxed);
+  if (state == EvaluationState::Active) {
+    activeFactorCountStorage().fetch_sub(1, std::memory_order_relaxed);
+  } else if (state == EvaluationState::Deactivated) {
+    deactivatedFactorCountStorage().fetch_sub(1, std::memory_order_relaxed);
+  }
+}
+
+template <class GEOMETRY_T>
+std::atomic<uint64_t>& ReprojectionError<GEOMETRY_T>::activeFactorCountStorage() {
+  static std::atomic<uint64_t> count{0};
+  return count;
+}
+
+template <class GEOMETRY_T>
+std::atomic<uint64_t>& ReprojectionError<GEOMETRY_T>::deactivatedFactorCountStorage() {
+  static std::atomic<uint64_t> count{0};
+  return count;
+}
+
+template <class GEOMETRY_T>
+void ReprojectionError<GEOMETRY_T>::updateEvaluationState(EvaluationState state) const {
+  if (!isRegisteredObservation()) return;
+  const EvaluationState previous = evaluationState_.exchange(state, std::memory_order_relaxed);
+  if (previous == state) return;
+  if (previous == EvaluationState::Active) {
+    activeFactorCountStorage().fetch_sub(1, std::memory_order_relaxed);
+  } else if (previous == EvaluationState::Deactivated) {
+    deactivatedFactorCountStorage().fetch_sub(1, std::memory_order_relaxed);
+  }
+  if (state == EvaluationState::Active) {
+    activeFactorCountStorage().fetch_add(1, std::memory_order_relaxed);
+  } else if (state == EvaluationState::Deactivated) {
+    deactivatedFactorCountStorage().fetch_add(1, std::memory_order_relaxed);
+  }
 }
 
 // Set the information.
@@ -117,15 +165,104 @@ bool ReprojectionError<GEOMETRY_T>::EvaluateWithMinimalJacobians(double const* c
   Eigen::Vector4d hp_C = T_CS * hp_S;
 
   // calculate the reprojection error
-  measurement_t kp;
-  Eigen::Matrix<double, 2, 4> Jh;
+  const double quietNaN = std::numeric_limits<double>::quiet_NaN();
+  measurement_t kp = measurement_t::Constant(quietNaN);
+  Eigen::Matrix<double, 2, 4> Jh = Eigen::Matrix<double, 2, 4>::Constant(quietNaN);
   Eigen::Matrix<double, 2, 4> Jh_weighted;
+  cameras::CameraBase::ProjectionStatus projectionStatus;
   if (jacobians != NULL) {
-    cameraGeometry_->projectHomogeneous(hp_C, &kp, &Jh);
-    Jh_weighted = squareRootInformation_ * Jh;
+    projectionStatus = cameraGeometry_->projectHomogeneous(hp_C, &kp, &Jh);
   } else {
-    cameraGeometry_->projectHomogeneous(hp_C, &kp);
+    projectionStatus = cameraGeometry_->projectHomogeneous(hp_C, &kp);
   }
+
+  const bool jacobianFinite = jacobians == NULL || Jh.allFinite();
+  const bool reprojectionFinite = kp.allFinite();
+  if (projectionStatus != cameras::CameraBase::ProjectionStatus::Successful || !reprojectionFinite ||
+      !jacobianFinite) {
+    updateEvaluationState(EvaluationState::Deactivated);
+    static std::atomic<uint64_t> warningCount{0};
+    const uint64_t count = warningCount.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (count <= 20 || count % 100 == 0) {
+      const char* projectionStatusName = "Unknown";
+      switch (projectionStatus) {
+        case cameras::CameraBase::ProjectionStatus::Successful:
+          projectionStatusName = "Successful";
+          break;
+        case cameras::CameraBase::ProjectionStatus::OutsideImage:
+          projectionStatusName = "OutsideImage";
+          break;
+        case cameras::CameraBase::ProjectionStatus::Masked:
+          projectionStatusName = "Masked";
+          break;
+        case cameras::CameraBase::ProjectionStatus::Behind:
+          projectionStatusName = "Behind";
+          break;
+        case cameras::CameraBase::ProjectionStatus::Invalid:
+          projectionStatusName = "Invalid";
+          break;
+      }
+      Eigen::VectorXd intrinsics;
+      cameraGeometry_->getIntrinsics(intrinsics);
+      Eigen::Vector3d projectionPoint = hp_C.head<3>();
+      if (hp_C[3] < 0.0) {
+        projectionPoint = -projectionPoint;
+      }
+      LOG(WARNING) << "[REPROJECTION_DIAGNOSTIC] event=" << count << " landmark_id=" << landmarkId_
+                   << " frame_id=" << frameId_ << " camera_id=" << cameraId() << " keypoint_id=" << keypointId_
+                   << " status=" << projectionStatusName << " image=" << cameraGeometry_->imageWidth() << "x"
+                   << cameraGeometry_->imageHeight() << " reprojection_finite=" << reprojectionFinite
+                   << " jacobian_requested=" << (jacobians != NULL) << " jacobian_finite=" << jacobianFinite
+                   << " active_factors=" << activeFactorCount()
+                   << " deactivated_factors=" << deactivatedFactorCount()
+                   << "\n  intrinsics=" << intrinsics.transpose() << "\n  measurement=" << measurement_.transpose()
+                   << " prediction=" << kp.transpose() << "\n  hp_W=" << hp_W.transpose() << " hp_S=" << hp_S.transpose()
+                   << " hp_C=" << hp_C.transpose()
+                   << " projection_point=" << projectionPoint.transpose() << "\n  t_WS_W=" << t_WS_W.transpose()
+                   << " q_WS_xyzw=" << q_WS.coeffs().transpose() << " q_WS_norm=" << q_WS.norm()
+                   << "\n  t_SC_S=" << t_SC_S.transpose() << " q_SC_xyzw=" << q_SC.coeffs().transpose()
+                   << " q_SC_norm=" << q_SC.norm() << "\n  sqrt_information=\n"
+                   << squareRootInformation_ << "\n  Jh=\n"
+                   << Jh;
+    }
+
+    residuals[0] = 0.0;
+    residuals[1] = 0.0;
+
+    if (jacobians != NULL) {
+      if (jacobians[0] != NULL) {
+        Eigen::Map<Eigen::Matrix<double, 2, 7, Eigen::RowMajor>> J0(jacobians[0]);
+        J0.setZero();
+      }
+      if (jacobians[1] != NULL) {
+        Eigen::Map<Eigen::Matrix<double, 2, 4, Eigen::RowMajor>> J1(jacobians[1]);
+        J1.setZero();
+      }
+      if (jacobians[2] != NULL) {
+        Eigen::Map<Eigen::Matrix<double, 2, 7, Eigen::RowMajor>> J2(jacobians[2]);
+        J2.setZero();
+      }
+    }
+
+    if (jacobiansMinimal != NULL) {
+      if (jacobiansMinimal[0] != NULL) {
+        Eigen::Map<Eigen::Matrix<double, 2, 6, Eigen::RowMajor>> J0_minimal(jacobiansMinimal[0]);
+        J0_minimal.setZero();
+      }
+      if (jacobiansMinimal[1] != NULL) {
+        Eigen::Map<Eigen::Matrix<double, 2, 3, Eigen::RowMajor>> J1_minimal(jacobiansMinimal[1]);
+        J1_minimal.setZero();
+      }
+      if (jacobiansMinimal[2] != NULL) {
+        Eigen::Map<Eigen::Matrix<double, 2, 6, Eigen::RowMajor>> J2_minimal(jacobiansMinimal[2]);
+        J2_minimal.setZero();
+      }
+    }
+
+    return true;
+  }
+
+  updateEvaluationState(EvaluationState::Active);
 
   measurement_t error = measurement_ - kp;
 
@@ -135,6 +272,10 @@ bool ReprojectionError<GEOMETRY_T>::EvaluateWithMinimalJacobians(double const* c
   // assign:
   residuals[0] = weighted_error[0];
   residuals[1] = weighted_error[1];
+
+  if (jacobians != NULL) {
+    Jh_weighted = squareRootInformation_ * Jh;
+  }
 
   // check validity:
   bool valid = true;

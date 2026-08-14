@@ -41,6 +41,8 @@
 
 #include <ceres/ceres.h>
 
+#include <atomic>
+#include <limits>
 #include <memory>
 #include <okvis/assert_macros.hpp>
 #include <okvis/ceres/ErrorInterface.hpp>
@@ -83,10 +85,13 @@ class ReprojectionError : public ReprojectionError2dBase {
   ReprojectionError(std::shared_ptr<const camera_geometry_t> cameraGeometry,
                     uint64_t cameraId,
                     const measurement_t& measurement,
-                    const covariance_t& information);
+                    const covariance_t& information,
+                    uint64_t landmarkId = 0,
+                    uint64_t frameId = 0,
+                    size_t keypointId = std::numeric_limits<size_t>::max());
 
   /// \brief Trivial destructor.
-  virtual ~ReprojectionError() {}
+  virtual ~ReprojectionError();
 
   // setters
   /// \brief Set the measurement.
@@ -113,6 +118,17 @@ class ReprojectionError : public ReprojectionError2dBase {
   /// \brief Get the covariance matrix.
   /// \return The inverse information (covariance) matrix.
   virtual const covariance_t& covariance() const { return covariance_; }
+
+  /// \brief Identity of the graph observation, or zero/maximum for temporary factors.
+  uint64_t landmarkId() const { return landmarkId_; }
+  uint64_t frameId() const { return frameId_; }
+  size_t keypointId() const { return keypointId_; }
+
+  /// \brief Counts of registered factors according to their most recent evaluation.
+  static uint64_t activeFactorCount() { return activeFactorCountStorage().load(std::memory_order_relaxed); }
+  static uint64_t deactivatedFactorCount() {
+    return deactivatedFactorCountStorage().load(std::memory_order_relaxed);
+  }
 
   // error term and Jacobian implementation
   /**
@@ -155,8 +171,20 @@ class ReprojectionError : public ReprojectionError2dBase {
   virtual std::string typeInfo() const { return "ReprojectionError"; }
 
  protected:
+  enum class EvaluationState : uint8_t { Unevaluated, Active, Deactivated };
+
+  bool isRegisteredObservation() const { return landmarkId_ != 0; }
+  void updateEvaluationState(EvaluationState state) const;
+  static std::atomic<uint64_t>& activeFactorCountStorage();
+  static std::atomic<uint64_t>& deactivatedFactorCountStorage();
+
   // the measurement
   measurement_t measurement_;  ///< The (2D) measurement.
+
+  uint64_t landmarkId_ = 0;  ///< Landmark ID, zero for temporary factors.
+  uint64_t frameId_ = 0;     ///< Multi-frame/pose ID, zero for temporary factors.
+  size_t keypointId_ = std::numeric_limits<size_t>::max();  ///< Keypoint index, maximum for temporary factors.
+  mutable std::atomic<EvaluationState> evaluationState_{EvaluationState::Unevaluated};
 
   /// \brief The camera model:
   std::shared_ptr<const camera_geometry_t> cameraGeometry_;
