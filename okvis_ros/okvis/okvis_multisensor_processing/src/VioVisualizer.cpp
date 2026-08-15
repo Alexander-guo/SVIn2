@@ -47,6 +47,8 @@
 #include <okvis/kinematics/Transformation.hpp>
 
 // cameras and distortions
+#include <algorithm>
+#include <cmath>
 #include <memory>
 #include <okvis/cameras/DoubleSphereCamera.hpp>
 #include <okvis/cameras/EquidistantDistortion.hpp>
@@ -73,20 +75,54 @@ cv::Mat VioVisualizer::drawMatches(VisualizationData::Ptr& data, size_t image_nu
   std::shared_ptr<okvis::MultiFrame> keyframe = data->keyFrames;
   std::shared_ptr<okvis::MultiFrame> frame = data->currentFrames;
 
-  if (keyframe == nullptr) return frame->image(image_number);
+  constexpr int kPanelHeight = 500;
+  constexpr double kMinimumMarkerRadius = 1.5;
+  constexpr double kMaximumMarkerRadius = 12.0;
 
-  // allocate an image
-  const unsigned int im_cols = frame->image(image_number).cols;
-  const unsigned int im_rows = frame->image(image_number).rows;
-  const unsigned int rowJump = im_rows;
+  const cv::Mat& currentImage = frame->image(image_number);
+  if (currentImage.empty()) return cv::Mat();
 
-  cv::Mat outimg(2 * im_rows, im_cols, CV_8UC3);
-  // copy current images Rect_(_Tp _x, _Tp _y, _Tp _width, _Tp _height);
-  cv::Mat current = outimg(cv::Rect(0, rowJump, im_cols, im_rows));
-  cv::Mat actKeyframe = outimg(cv::Rect(0, 0, im_cols, im_rows));
+  const auto panelWidth = [](const cv::Mat& image) {
+    return std::max(1, cvRound(static_cast<double>(image.cols) * kPanelHeight / image.rows));
+  };
+  const auto toDisplayImage = [&](const cv::Mat& image, cv::Mat& displayImage, int width) {
+    cv::Mat colorImage;
+    if (image.channels() == 1) {
+      cv::cvtColor(image, colorImage, cv::COLOR_GRAY2BGR);
+    } else {
+      colorImage = image;
+    }
+    cv::resize(colorImage, displayImage, cv::Size(width, kPanelHeight), 0.0, 0.0, cv::INTER_AREA);
+  };
 
-  cv::cvtColor(frame->image(image_number), current, cv::COLOR_GRAY2BGR);
-  cv::cvtColor(keyframe->image(image_number), actKeyframe, cv::COLOR_GRAY2BGR);
+  const int currentWidth = panelWidth(currentImage);
+  const double currentScale = static_cast<double>(kPanelHeight) / currentImage.rows;
+  if (keyframe == nullptr) {
+    cv::Mat currentDisplay;
+    toDisplayImage(currentImage, currentDisplay, currentWidth);
+    return currentDisplay;
+  }
+
+  const cv::Mat& keyframeImage = keyframe->image(image_number);
+  if (keyframeImage.empty()) return cv::Mat();
+  const int keyframeWidth = panelWidth(keyframeImage);
+  const double keyframeScale = static_cast<double>(kPanelHeight) / keyframeImage.rows;
+  const int outputWidth = std::max(currentWidth, keyframeWidth);
+  const int rowJump = kPanelHeight;
+
+  cv::Mat outimg(2 * kPanelHeight, outputWidth, CV_8UC3, cv::Scalar::all(0));
+  cv::Mat current = outimg(cv::Rect(0, rowJump, currentWidth, kPanelHeight));
+  cv::Mat actKeyframe = outimg(cv::Rect(0, 0, keyframeWidth, kPanelHeight));
+  toDisplayImage(currentImage, current, currentWidth);
+  toDisplayImage(keyframeImage, actKeyframe, keyframeWidth);
+
+  const auto scaledPoint = [](const Eigen::Vector2d& point, double scale, double yOffset = 0.0) {
+    return cv::Point2f(static_cast<float>(point[0] * scale), static_cast<float>(point[1] * scale + yOffset));
+  };
+  const auto markerRadius = [&](double keypointSize, double scale) {
+    if (!std::isfinite(keypointSize) || keypointSize <= 0.0) return kMinimumMarkerRadius;
+    return std::clamp(0.5 * keypointSize * scale, kMinimumMarkerRadius, kMaximumMarkerRadius);
+  };
 
   // the keyframe trafo
   Eigen::Vector2d keypoint;
@@ -161,30 +197,39 @@ cv::Mat VioVisualizer::drawMatches(VisualizationData::Ptr& data, size_t image_nu
         }
       }
 
-      if (isVisibleInKeyframe) {
+      if (isVisibleInKeyframe && keyframePt.allFinite() && keypoint.allFinite()) {
         // found in the keyframe. draw line
         cv::line(outimg,
-                 cv::Point2f(keyframePt[0], keyframePt[1]),
-                 cv::Point2f(keypoint[0], keypoint[1] + rowJump),
+                 scaledPoint(keyframePt, keyframeScale),
+                 scaledPoint(keypoint, currentScale, rowJump),
                  color,
                  1,
                  cv::LINE_AA);
-        cv::circle(
-            actKeyframe, cv::Point2f(keyframePt[0], keyframePt[1]), 0.5 * it->keypointSize, color, 1, cv::LINE_AA);
+        cv::circle(actKeyframe,
+                   scaledPoint(keyframePt, keyframeScale),
+                   markerRadius(it->keypointSize, keyframeScale),
+                   color,
+                   1,
+                   cv::LINE_AA);
       }
     }
     // draw keypoint
-    const double r = 0.5 * it->keypointSize;
-    cv::circle(current, cv::Point2f(keypoint[0], keypoint[1]), r, color, 1, cv::LINE_AA);
+    if (!keypoint.allFinite()) continue;
+    const double r = markerRadius(it->keypointSize, currentScale);
+    const cv::Point2f currentPoint = scaledPoint(keypoint, currentScale);
+    cv::circle(current, currentPoint, r, color, 1, cv::LINE_AA);
     cv::KeyPoint cvKeypoint;
     frame->getCvKeypoint(image_number, it->keypointIdx, cvKeypoint);
-    const double angle = cvKeypoint.angle / 180.0 * M_PI;
-    cv::line(outimg,
-             cv::Point2f(keypoint[0], keypoint[1] + rowJump),
-             cv::Point2f(keypoint[0], keypoint[1] + rowJump) + cv::Point2f(cos(angle), sin(angle)) * r,
-             color,
-             1,
-             cv::LINE_AA);
+    if (std::isfinite(cvKeypoint.angle) && cvKeypoint.angle >= 0.0f) {
+      const double angle = cvKeypoint.angle / 180.0 * M_PI;
+      const cv::Point2f stackedCurrentPoint = scaledPoint(keypoint, currentScale, rowJump);
+      cv::line(outimg,
+               stackedCurrentPoint,
+               stackedCurrentPoint + cv::Point2f(cos(angle), sin(angle)) * r,
+               color,
+               1,
+               cv::LINE_AA);
+    }
   }
   return outimg;
 }
