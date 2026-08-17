@@ -99,22 +99,22 @@ opengv::relative_pose::FrameRelativeAdapter::FrameRelativeAdapter(const okvis::E
   size_t numKeypointsB = frameBPtr->numKeypoints(camIdB);
   switch (distortionTypeB) {
     case okvis::cameras::NCameraSystem::RadialTangential: {
-      fu2 = frameAPtr->geometryAs<okvis::cameras::PinholeCamera<okvis::cameras::RadialTangentialDistortion> >(camIdB)
+      fu2 = frameBPtr->geometryAs<okvis::cameras::PinholeCamera<okvis::cameras::RadialTangentialDistortion> >(camIdB)
                 ->focalLengthU();
       break;
     }
     case okvis::cameras::NCameraSystem::Equidistant: {
-      fu2 = frameAPtr->geometryAs<okvis::cameras::PinholeCamera<okvis::cameras::EquidistantDistortion> >(camIdB)
+      fu2 = frameBPtr->geometryAs<okvis::cameras::PinholeCamera<okvis::cameras::EquidistantDistortion> >(camIdB)
                 ->focalLengthU();
       break;
     }
     case okvis::cameras::NCameraSystem::RadialTangential8: {
-      fu2 = frameAPtr->geometryAs<okvis::cameras::PinholeCamera<okvis::cameras::RadialTangentialDistortion8> >(camIdB)
+      fu2 = frameBPtr->geometryAs<okvis::cameras::PinholeCamera<okvis::cameras::RadialTangentialDistortion8> >(camIdB)
                 ->focalLengthU();
       break;
     }
     case okvis::cameras::NCameraSystem::NoDistortion: {
-      fu2 = frameAPtr->geometryAs<okvis::cameras::DoubleSphereCamera<okvis::cameras::NoDistortion> >(camIdB)
+      fu2 = frameBPtr->geometryAs<okvis::cameras::DoubleSphereCamera<okvis::cameras::NoDistortion> >(camIdB)
                 ->focalLengthU();
       break;
     }
@@ -136,9 +136,6 @@ opengv::relative_pose::FrameRelativeAdapter::FrameRelativeAdapter(const okvis::E
     uint64_t lmId = frameBPtr->landmarkId(camIdB, k);
     if (lmId == 0) continue;
 
-    // check, if existing
-    if (!estimator.isLandmarkAdded(lmId)) continue;
-
     // remember it
     idMap.insert(std::pair<uint64_t, size_t>(lmId, k));
   }
@@ -155,7 +152,11 @@ opengv::relative_pose::FrameRelativeAdapter::FrameRelativeAdapter(const okvis::E
     }
   }
 
-  // precompute
+  // Precompute bearings. Pending direction-only tracks deliberately have no
+  // estimator landmark yet, so validity is determined by the two camera
+  // backprojections rather than by Estimator::isLandmarkAdded().
+  okvis::Matches validMatches;
+  validMatches.reserve(matches_.size());
   for (size_t k = 0; k < matches_.size(); ++k) {
     const size_t idx1 = matches_[k].idxA;
     const size_t idx2 = matches_[k].idxB;
@@ -165,64 +166,20 @@ opengv::relative_pose::FrameRelativeAdapter::FrameRelativeAdapter(const okvis::E
     frameAPtr->getKeypointSize(camIdA, idx1, keypointStdDev);
     keypointStdDev = 0.8 * keypointStdDev / 12.0;
     sigmaAngles1_[idx1] = sqrt(2) * keypointStdDev * keypointStdDev / (fu1 * fu1);
-    switch (distortionTypeA) {
-      case okvis::cameras::NCameraSystem::RadialTangential: {
-        frameAPtr->geometryAs<okvis::cameras::PinholeCamera<okvis::cameras::RadialTangentialDistortion> >(camIdA)
-            ->backProject(keypoint, &bearingVectors1_[idx1]);
-        break;
-      }
-      case okvis::cameras::NCameraSystem::Equidistant: {
-        frameAPtr->geometryAs<okvis::cameras::PinholeCamera<okvis::cameras::EquidistantDistortion> >(camIdA)
-            ->backProject(keypoint, &bearingVectors1_[idx1]);
-        break;
-      }
-      case okvis::cameras::NCameraSystem::RadialTangential8: {
-        frameAPtr->geometryAs<okvis::cameras::PinholeCamera<okvis::cameras::RadialTangentialDistortion8> >(camIdA)
-            ->backProject(keypoint, &bearingVectors1_[idx1]);
-        break;
-      }
-      case okvis::cameras::NCameraSystem::NoDistortion: {
-        frameAPtr->geometryAs<okvis::cameras::DoubleSphereCamera<okvis::cameras::NoDistortion> >(camIdA)
-            ->backProject(keypoint, &bearingVectors1_[idx1]);
-        break;
-      }
-      default:
-        OKVIS_THROW(Exception, "Unsupported distortion type")
-        break;
-    }
+    const bool backProject1Ok = frameAPtr->geometry(camIdA)->backProject(keypoint, &bearingVectors1_[idx1]);
+    if (!backProject1Ok || !bearingVectors1_[idx1].allFinite() || bearingVectors1_[idx1].norm() <= 1.0e-12) continue;
     bearingVectors1_[idx1].normalize();
 
     frameBPtr->getKeypoint(camIdB, idx2, keypoint);
     frameBPtr->getKeypointSize(camIdB, idx2, keypointStdDev);
     keypointStdDev = 0.8 * keypointStdDev / 12.0;
     sigmaAngles2_[idx2] = sqrt(2) * keypointStdDev * keypointStdDev / (fu2 * fu2);
-    switch (distortionTypeB) {
-      case okvis::cameras::NCameraSystem::RadialTangential: {
-        frameAPtr->geometryAs<okvis::cameras::PinholeCamera<okvis::cameras::RadialTangentialDistortion> >(camIdB)
-            ->backProject(keypoint, &bearingVectors2_[idx2]);
-        break;
-      }
-      case okvis::cameras::NCameraSystem::Equidistant: {
-        frameAPtr->geometryAs<okvis::cameras::PinholeCamera<okvis::cameras::EquidistantDistortion> >(camIdB)
-            ->backProject(keypoint, &bearingVectors2_[idx2]);
-        break;
-      }
-      case okvis::cameras::NCameraSystem::RadialTangential8: {
-        frameAPtr->geometryAs<okvis::cameras::PinholeCamera<okvis::cameras::RadialTangentialDistortion8> >(camIdB)
-            ->backProject(keypoint, &bearingVectors2_[idx2]);
-        break;
-      }
-      case okvis::cameras::NCameraSystem::NoDistortion: {
-        frameAPtr->geometryAs<okvis::cameras::DoubleSphereCamera<okvis::cameras::NoDistortion> >(camIdB)
-            ->backProject(keypoint, &bearingVectors2_[idx2]);
-        break;
-      }
-      default:
-        OKVIS_THROW(Exception, "Unsupported distortion type")
-        break;
-    }
+    const bool backProject2Ok = frameBPtr->geometry(camIdB)->backProject(keypoint, &bearingVectors2_[idx2]);
+    if (!backProject2Ok || !bearingVectors2_[idx2].allFinite() || bearingVectors2_[idx2].norm() <= 1.0e-12) continue;
     bearingVectors2_[idx2].normalize();
+    validMatches.push_back(matches_[k]);
   }
+  matches_.swap(validMatches);
 }
 
 // Retrieve the bearing vector of a correspondence in viewpoint 1.

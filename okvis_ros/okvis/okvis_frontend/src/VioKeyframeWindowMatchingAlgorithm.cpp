@@ -46,6 +46,8 @@
 
 // cameras and distortions
 #include <algorithm>
+#include <map>
+#include <set>
 #include <okvis/cameras/DoubleSphereCamera.hpp>
 #include <okvis/cameras/EquidistantDistortion.hpp>
 #include <okvis/cameras/NoDistortion.hpp>
@@ -150,6 +152,10 @@ void VioKeyframeWindowMatchingAlgorithm<CAMERA_GEOMETRY_T>::doSetup() {
   // reset the match counter
   numMatches_ = 0;
   numUncertainMatches_ = 0;
+  numBearingOnlyMatches_ = 0;
+  numFiniteMatches_ = 0;
+  numPromotions_ = 0;
+  rejectedCandidates_.store(0, std::memory_order_relaxed);
 
   const size_t numA = frameA_->numKeypoints(camIdA_);
   skipA_.clear();
@@ -289,6 +295,111 @@ float VioKeyframeWindowMatchingAlgorithm<CAMERA_GEOMETRY_T>::distanceThreshold()
   return distanceThreshold_;
 }
 
+template <class CAMERA_GEOMETRY_T>
+std::vector<okvis::KeypointIdentifier>
+VioKeyframeWindowMatchingAlgorithm<CAMERA_GEOMETRY_T>::trackObservations(uint64_t trackId) const {
+  std::vector<okvis::KeypointIdentifier> observations;
+  for (size_t age = 0; age < estimator_->numFrames(); ++age) {
+    const uint64_t frameId = estimator_->frameIdByAge(age);
+    const std::shared_ptr<okvis::MultiFrame> multiFrame = estimator_->multiFrame(frameId);
+    for (size_t cameraIndex = 0; cameraIndex < multiFrame->numFrames(); ++cameraIndex) {
+      for (size_t keypointIndex = 0; keypointIndex < multiFrame->numKeypoints(cameraIndex); ++keypointIndex) {
+        if (multiFrame->landmarkId(cameraIndex, keypointIndex) == trackId) {
+          observations.emplace_back(frameId, cameraIndex, keypointIndex);
+        }
+      }
+    }
+  }
+  return observations;
+}
+
+template <class CAMERA_GEOMETRY_T>
+bool VioKeyframeWindowMatchingAlgorithm<CAMERA_GEOMETRY_T>::mergePendingTracks(uint64_t targetId,
+                                                                                uint64_t sourceId) {
+  if (targetId == sourceId) return true;
+  if (estimator_->isLandmarkAdded(targetId) || estimator_->isLandmarkAdded(sourceId)) return false;
+
+  const std::vector<okvis::KeypointIdentifier> targetObservations = trackObservations(targetId);
+  const std::vector<okvis::KeypointIdentifier> sourceObservations = trackObservations(sourceId);
+  std::set<std::pair<uint64_t, size_t>> occupiedImages;
+  for (const okvis::KeypointIdentifier& observation : targetObservations) {
+    occupiedImages.emplace(observation.frameId, observation.cameraIndex);
+  }
+  for (const okvis::KeypointIdentifier& observation : sourceObservations) {
+    if (occupiedImages.count(std::make_pair(observation.frameId, observation.cameraIndex)) != 0) {
+      return false;
+    }
+  }
+
+  for (const okvis::KeypointIdentifier& observation : sourceObservations) {
+    estimator_->multiFrame(observation.frameId)
+        ->setLandmarkId(observation.cameraIndex, observation.keypointIndex, targetId);
+  }
+  return true;
+}
+
+template <class CAMERA_GEOMETRY_T>
+bool VioKeyframeWindowMatchingAlgorithm<CAMERA_GEOMETRY_T>::observationIsValid(
+    const okvis::KeypointIdentifier& observation,
+    const Eigen::Vector4d& homogeneousPoint_W) const {
+  if (!homogeneousPoint_W.allFinite()) return false;
+
+  okvis::kinematics::Transformation T_WS;
+  okvis::kinematics::Transformation T_SC;
+  estimator_->get_T_WS(observation.frameId, T_WS);
+  estimator_->getCameraSensorStates(observation.frameId, observation.cameraIndex, T_SC);
+  const Eigen::Vector4d homogeneousPoint_C = T_SC.inverse() * T_WS.inverse() * homogeneousPoint_W;
+
+  const std::shared_ptr<okvis::MultiFrame> multiFrame = estimator_->multiFrame(observation.frameId);
+  Eigen::Vector2d prediction;
+  const cameras::CameraBase::ProjectionStatus status =
+      multiFrame->geometryAs<camera_geometry_t>(observation.cameraIndex)
+          ->projectHomogeneous(homogeneousPoint_C, &prediction);
+  if (status != cameras::CameraBase::ProjectionStatus::Successful || !prediction.allFinite()) return false;
+
+  Eigen::Vector2d measurement;
+  double keypointSize = 0.0;
+  if (!multiFrame->getKeypoint(observation.cameraIndex, observation.keypointIndex, measurement) ||
+      !multiFrame->getKeypointSize(observation.cameraIndex, observation.keypointIndex, keypointSize) ||
+      !measurement.allFinite() || !std::isfinite(keypointSize)) {
+    return false;
+  }
+  const double keypointStdDev = 0.8 * keypointSize / 12.0;
+  if (!(keypointStdDev > 0.0) || !std::isfinite(keypointStdDev)) return false;
+  const double chi2 = (prediction - measurement).squaredNorm() / (keypointStdDev * keypointStdDev);
+  return std::isfinite(chi2) && chi2 <= 4.0;
+}
+
+template <class CAMERA_GEOMETRY_T>
+size_t VioKeyframeWindowMatchingAlgorithm<CAMERA_GEOMETRY_T>::promoteTrack(
+    uint64_t trackId,
+    const Eigen::Vector4d& homogeneousPoint_W) {
+  std::vector<okvis::KeypointIdentifier> validObservations;
+  const std::vector<okvis::KeypointIdentifier> observations = trackObservations(trackId);
+  validObservations.reserve(observations.size());
+  for (const okvis::KeypointIdentifier& observation : observations) {
+    if (observationIsValid(observation, homogeneousPoint_W)) {
+      validObservations.push_back(observation);
+    } else {
+      estimator_->multiFrame(observation.frameId)
+          ->setLandmarkId(observation.cameraIndex, observation.keypointIndex, 0);
+    }
+  }
+  if (validObservations.size() < 2) return 0;
+
+  if (!estimator_->isLandmarkAdded(trackId)) {
+    if (!estimator_->addLandmark(trackId, homogeneousPoint_W)) return 0;
+  } else {
+    estimator_->setLandmark(trackId, homogeneousPoint_W);
+  }
+  estimator_->setLandmarkInitialized(trackId, true);
+  for (const okvis::KeypointIdentifier& observation : validObservations) {
+    estimator_->addObservation<camera_geometry_t>(
+        trackId, observation.frameId, observation.cameraIndex, observation.keypointIndex);
+  }
+  return validObservations.size();
+}
+
 // Geometric verification of a match.
 template <class CAMERA_GEOMETRY_T>
 bool VioKeyframeWindowMatchingAlgorithm<CAMERA_GEOMETRY_T>::verifyMatch(size_t indexA, size_t indexB) const {
@@ -301,6 +412,7 @@ bool VioKeyframeWindowMatchingAlgorithm<CAMERA_GEOMETRY_T>::verifyMatch(size_t i
     if (valid) {
       return true;
     }
+    rejectedCandidates_.fetch_add(1, std::memory_order_relaxed);
   } else {
     // get projection into B
     Eigen::Vector2d kptB = projectionsIntoB_.row(indexA);
@@ -348,6 +460,21 @@ size_t VioKeyframeWindowMatchingAlgorithm<CAMERA_GEOMETRY_T>::numUncertainMatche
   return numUncertainMatches_;
 }
 
+template <class CAMERA_GEOMETRY_T>
+size_t VioKeyframeWindowMatchingAlgorithm<CAMERA_GEOMETRY_T>::numActivePendingTracks() const {
+  std::set<uint64_t> pendingTrackIds;
+  for (size_t age = 0; age < estimator_->numFrames(); ++age) {
+    const std::shared_ptr<okvis::MultiFrame> multiFrame = estimator_->multiFrame(estimator_->frameIdByAge(age));
+    for (size_t cameraIndex = 0; cameraIndex < multiFrame->numFrames(); ++cameraIndex) {
+      for (size_t keypointIndex = 0; keypointIndex < multiFrame->numKeypoints(cameraIndex); ++keypointIndex) {
+        const uint64_t trackId = multiFrame->landmarkId(cameraIndex, keypointIndex);
+        if (trackId != 0 && !estimator_->isLandmarkAdded(trackId)) pendingTrackIds.insert(trackId);
+      }
+    }
+  }
+  return pendingTrackIds.size();
+}
+
 // At the end of the matching step, this function is called once
 // for each pair of matches discovered.
 template <class CAMERA_GEOMETRY_T>
@@ -359,101 +486,52 @@ void VioKeyframeWindowMatchingAlgorithm<CAMERA_GEOMETRY_T>::setBestMatch(size_t 
   uint64_t lmIdB = frameB_->landmarkId(camIdB_, indexB);
 
   if (matchingType_ == Match2D2D) {
-    // check that not both are set
-    if (lmIdA != 0 && lmIdB != 0) {
-      return;
-    }
-
-    // re-triangulate...
-    // potential 2d2d match - verify by triangulation
     Eigen::Vector4d hP_Ca;
     bool canBeInitialized;
-    bool valid = probabilisticStereoTriangulator_.stereoTriangulate(
+    const bool valid = probabilisticStereoTriangulator_.stereoTriangulate(
         indexA, indexB, hP_Ca, canBeInitialized, std::max(raySigmasA_[indexA], raySigmasB_[indexB]));
-    if (!valid) {
-      return;
-    }
+    if (!valid) return;
 
-    // get the uncertainty
-    if (canBeInitialized) {  // know more exactly
+    if (canBeInitialized) {
       Eigen::Matrix3d pointUOplus_A;
       probabilisticStereoTriangulator_.getUncertainty(indexA, indexB, hP_Ca, pointUOplus_A, canBeInitialized);
     }
 
-    // check and adapt landmark status
-    bool insertA = lmIdA == 0;
-    bool insertB = lmIdB == 0;
-    bool insertHomogeneousPointParameterBlock = false;
-    uint64_t lmId = 0;  // 0 just to avoid warning
-    if (insertA && insertB) {
-      // ok, we need to assign a new Id...
-      lmId = okvis::IdProvider::instance().newId();
-      frameA_->setLandmarkId(camIdA_, indexA, lmId);
-      frameB_->setLandmarkId(camIdB_, indexB, lmId);
-      lmIdA = lmId;
-      lmIdB = lmId;
-      // and add it to the graph
-      insertHomogeneousPointParameterBlock = true;
+    uint64_t trackId = 0;
+    if (lmIdA == 0 && lmIdB == 0) {
+      trackId = okvis::IdProvider::instance().newId();
+    } else if (lmIdA == 0) {
+      trackId = lmIdB;
+    } else if (lmIdB == 0) {
+      trackId = lmIdA;
+    } else if (lmIdA == lmIdB) {
+      trackId = lmIdA;
     } else {
-      if (!insertA) {
-        lmId = lmIdA;
-        if (!estimator_->isLandmarkAdded(lmId)) {
-          // add landmark and observation to the graph
-          insertHomogeneousPointParameterBlock = true;
-          insertA = true;
-        }
-      }
-      if (!insertB) {
-        lmId = lmIdB;
-        if (!estimator_->isLandmarkAdded(lmId)) {
-          // add landmark and observation to the graph
-          insertHomogeneousPointParameterBlock = true;
-          insertB = true;
-        }
-      }
-    }
-    // add landmark to graph if necessary
-    if (insertHomogeneousPointParameterBlock) {
-      estimator_->addLandmark(lmId, T_WCa_ * hP_Ca);
-      OKVIS_ASSERT_TRUE(Exception, estimator_->isLandmarkAdded(lmId), lmId << " not added, bug");
-      estimator_->setLandmarkInitialized(lmId, canBeInitialized);
-    } else {
-      // update initialization status, set better estimate, if possible
-      if (canBeInitialized) {
-        estimator_->setLandmarkInitialized(lmId, true);
-        estimator_->setLandmark(lmId, T_WCa_ * hP_Ca);
-      }
+      const bool landmarkAExists = estimator_->isLandmarkAdded(lmIdA);
+      const bool landmarkBExists = estimator_->isLandmarkAdded(lmIdB);
+      if (landmarkAExists || landmarkBExists || !mergePendingTracks(lmIdA, lmIdB)) return;
+      trackId = lmIdA;
     }
 
-    // in image A
-    okvis::MapPoint landmark;
-    if (insertA && landmark.observations.find(okvis::KeypointIdentifier(mfIdA_, camIdA_, indexA)) ==
-                       landmark.observations.end()) {  // ensure no double observations...
-                                                       // TODO(test) hp_Sa NOT USED!
-      Eigen::Vector4d hp_Sa(T_SaCa_ * hP_Ca);
-      hp_Sa.normalize();
-      frameA_->setLandmarkId(camIdA_, indexA, lmId);
-      lmIdA = lmId;
-      // initialize in graph
-      OKVIS_ASSERT_TRUE(Exception, estimator_->isLandmarkAdded(lmId), "landmark id=" << lmId << " not added");
-      estimator_->addObservation<camera_geometry_t>(lmId, mfIdA_, camIdA_, indexA);
+    // A weak 2D-2D match must never attach new observations to a landmark
+    // that is already in the graph. The 3D-2D matching path owns that case.
+    if (!canBeInitialized && estimator_->isLandmarkAdded(trackId)) return;
+
+    frameA_->setLandmarkId(camIdA_, indexA, trackId);
+    frameB_->setLandmarkId(camIdB_, indexB, trackId);
+
+    if (!canBeInitialized) {
+      ++numBearingOnlyMatches_;
+      ++numMatches_;
+      return;
     }
 
-    // in image B
-    if (insertB && landmark.observations.find(okvis::KeypointIdentifier(mfIdB_, camIdB_, indexB)) ==
-                       landmark.observations.end()) {  // ensure no double observations...
-      Eigen::Vector4d hp_Sb(T_SbCb_ * T_CbCa_ * hP_Ca);
-      hp_Sb.normalize();
-      frameB_->setLandmarkId(camIdB_, indexB, lmId);
-      lmIdB = lmId;
-      // initialize in graph
-      OKVIS_ASSERT_TRUE(Exception, estimator_->isLandmarkAdded(lmId), "landmark " << lmId << " not added");
-      estimator_->addObservation<camera_geometry_t>(lmId, mfIdB_, camIdB_, indexB);
-    }
-
-    // let's check for consistency with other observations:
-    okvis::ceres::HomogeneousPointParameterBlock point(T_WCa_ * hP_Ca, 0);
-    if (canBeInitialized) estimator_->setLandmark(lmId, point.estimate());
+    const bool wasPending = !estimator_->isLandmarkAdded(trackId);
+    const Eigen::Vector4d homogeneousPoint_W = T_WCa_ * hP_Ca;
+    const size_t observationCount = promoteTrack(trackId, homogeneousPoint_W);
+    if (observationCount < 2) return;
+    ++numFiniteMatches_;
+    if (wasPending) ++numPromotions_;
 
   } else {
     OKVIS_ASSERT_TRUE_DBG(Exception, lmIdB == 0, "bug. Id in frame B already set.");

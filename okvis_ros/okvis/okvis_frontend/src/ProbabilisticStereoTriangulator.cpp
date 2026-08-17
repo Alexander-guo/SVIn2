@@ -47,7 +47,10 @@
 
 // cameras and distortions
 #include <algorithm>
+#include <atomic>
+#include <limits>
 #include <memory>
+#include <glog/logging.h>
 #include <okvis/cameras/DoubleSphereCamera.hpp>
 #include <okvis/cameras/EquidistantDistortion.hpp>
 #include <okvis/cameras/NoDistortion.hpp>
@@ -169,43 +172,139 @@ bool ProbabilisticStereoTriangulator<CAMERA_GEOMETRY_T>::stereoTriangulate(
   bool isValid;
   bool isParallel;
   Eigen::Vector2d keypointCoordinatesA, keypointCoordinatesB;
-  Eigen::Vector3d backProjectionDirectionA_inA, backProjectionDirectionB_inA;
+  Eigen::Vector3d backProjectionDirectionA_inA =
+      Eigen::Vector3d::Constant(std::numeric_limits<double>::quiet_NaN());
+  Eigen::Vector3d backProjectionDirectionB_inA =
+      Eigen::Vector3d::Constant(std::numeric_limits<double>::quiet_NaN());
 
   frameA_->getKeypoint(camIdA_, keypointIdxA, keypointCoordinatesA);
   frameB_->getKeypoint(camIdB_, keypointIdxB, keypointCoordinatesB);
 
-  frameA_->geometryAs<CAMERA_GEOMETRY_T>(camIdA_)->backProject(keypointCoordinatesA, &backProjectionDirectionA_inA);
-  frameB_->geometryAs<CAMERA_GEOMETRY_T>(camIdB_)->backProject(keypointCoordinatesB,
-                                                               &backProjectionDirectionB_inA);  // direction in frame B
-  backProjectionDirectionB_inA = T_AB_.C() * backProjectionDirectionB_inA;
+  const bool backProjectAOk =
+      frameA_->geometryAs<CAMERA_GEOMETRY_T>(camIdA_)->backProject(keypointCoordinatesA,
+                                                                   &backProjectionDirectionA_inA);
+  const bool backProjectBOk =
+      frameB_->geometryAs<CAMERA_GEOMETRY_T>(camIdB_)->backProject(keypointCoordinatesB,
+                                                                   &backProjectionDirectionB_inA);
+  if (backProjectBOk) {
+    backProjectionDirectionB_inA = T_AB_.C() * backProjectionDirectionB_inA;
+  }
 
+  TriangulationDiagnostics triangulationDiagnostics;
   Eigen::Vector4d hpA = triangulateFast(Eigen::Vector3d(0, 0, 0),  // center of A in A coordinates (0,0,0)
-                                        backProjectionDirectionA_inA.normalized(),
+                                        backProjectionDirectionA_inA,
                                         T_AB_.r(),  // center of B in A coordinates
-                                        backProjectionDirectionB_inA.normalized(),
+                                        backProjectionDirectionB_inA,
                                         sigmaR,
                                         isValid,
-                                        isParallel);
+                                        isParallel,
+                                        &triangulationDiagnostics);
   outCanBeInitializedInaccuarate = !isParallel;
 
+  const Eigen::Vector4d hpB = T_BA_ * hpA;
+  Eigen::Vector2d projectedA = Eigen::Vector2d::Constant(std::numeric_limits<double>::quiet_NaN());
+  Eigen::Vector2d projectedB = Eigen::Vector2d::Constant(std::numeric_limits<double>::quiet_NaN());
+  const cameras::CameraBase::ProjectionStatus projectionStatusA =
+      frameA_->geometryAs<CAMERA_GEOMETRY_T>(camIdA_)->projectHomogeneous(hpA, &projectedA);
+  const cameras::CameraBase::ProjectionStatus projectionStatusB =
+      frameB_->geometryAs<CAMERA_GEOMETRY_T>(camIdB_)->projectHomogeneous(hpB, &projectedB);
+  const auto statusName = [](cameras::CameraBase::ProjectionStatus status) {
+    switch (status) {
+      case cameras::CameraBase::ProjectionStatus::Successful:
+        return "Successful";
+      case cameras::CameraBase::ProjectionStatus::OutsideImage:
+        return "OutsideImage";
+      case cameras::CameraBase::ProjectionStatus::Masked:
+        return "Masked";
+      case cameras::CameraBase::ProjectionStatus::Behind:
+        return "Behind";
+      case cameras::CameraBase::ProjectionStatus::Invalid:
+        return "Invalid";
+    }
+    return "Unknown";
+  };
+  const auto triangulationStatusName = [](TriangulationStatus status) {
+    switch (status) {
+      case TriangulationStatus::Success:
+        return "Success";
+      case TriangulationStatus::InvalidInput:
+        return "InvalidInput";
+      case TriangulationStatus::InsufficientParallax:
+        return "InsufficientParallax";
+      case TriangulationStatus::Singular:
+        return "Singular";
+      case TriangulationStatus::BehindRay:
+        return "BehindRay";
+      case TriangulationStatus::InsufficientBaselineRangeRatio:
+        return "InsufficientBaselineRangeRatio";
+      case TriangulationStatus::RayMismatch:
+        return "RayMismatch";
+    }
+    return "Unknown";
+  };
+  const auto triangulationTypeName = [](TriangulationType type) {
+    switch (type) {
+      case TriangulationType::Rejected:
+        return "Rejected";
+      case TriangulationType::BearingOnly:
+        return "BearingOnly";
+      case TriangulationType::Finite:
+        return "Finite";
+    }
+    return "Unknown";
+  };
+  const double depthA = std::abs(hpA[3]) > 1.0e-12 ? hpA[2] / hpA[3] : hpA[2];
+  const double depthB = std::abs(hpB[3]) > 1.0e-12 ? hpB[2] / hpB[3] : hpB[2];
+  const auto logTriangulation = [&](const char* result, const char* reason, double errorA, double errorB) {
+    static std::atomic<uint64_t> diagnosticCount{0};
+    const uint64_t count = diagnosticCount.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (count <= 20 || count % 1000000 == 0) {
+      LOG(INFO) << "[TRIANGULATION_DIAGNOSTIC] event=" << count << " result=" << result << " reason=" << reason
+                << " frame_a=" << frameA_->id() << " camera_a=" << camIdA_ << " keypoint_a=" << keypointIdxA
+                << " frame_b=" << frameB_->id() << " camera_b=" << camIdB_ << " keypoint_b=" << keypointIdxB
+                << " backproject_a=" << backProjectAOk << " backproject_b=" << backProjectBOk
+                << " triangulation_status=" << triangulationStatusName(triangulationDiagnostics.status)
+                << " triangulation_type=" << triangulationTypeName(triangulationDiagnostics.type)
+                << " parallel=" << isParallel
+                << " parallax_deg=" << triangulationDiagnostics.parallaxAngle * 180.0 / M_PI
+                << " minimum_parallax_deg=" << triangulationDiagnostics.minimumParallaxAngle * 180.0 / M_PI
+                << " baseline=" << triangulationDiagnostics.baseline
+                << " range_a=" << triangulationDiagnostics.range1 << " range_b=" << triangulationDiagnostics.range2
+                << " baseline_range_ratio=" << triangulationDiagnostics.baselineRangeRatio
+                << " minimum_baseline_range_ratio=" << triangulationDiagnostics.minimumBaselineRangeRatio
+                << " triangulation_chi2=" << triangulationDiagnostics.chi2
+                << " depth_a=" << depthA << " depth_b=" << depthB
+                << " status_a=" << statusName(projectionStatusA) << " status_b=" << statusName(projectionStatusB)
+                << " error_a=" << errorA << " error_b=" << errorB << " hp_a=" << hpA.transpose()
+                << " hp_b=" << hpB.transpose();
+    }
+  };
+
   if (!isValid) {
+    logTriangulation("rejected", triangulationStatusName(triangulationDiagnostics.status),
+                     std::numeric_limits<double>::quiet_NaN(),
+                     std::numeric_limits<double>::quiet_NaN());
     return false;
   }
 
   // check reprojection:
-  double errA, errB;
+  double errA = std::numeric_limits<double>::quiet_NaN();
+  double errB = std::numeric_limits<double>::quiet_NaN();
   isValid = computeReprojectionError4(frameA_, camIdA_, keypointIdxA, hpA, errA);
   if (!isValid) {
+    logTriangulation("rejected", "reprojection_a", errA, std::numeric_limits<double>::quiet_NaN());
     return false;
   }
-  Eigen::Vector4d outHomogeneousPoint_B = T_BA_ * Eigen::Vector4d(hpA);
-  if (!computeReprojectionError4(frameB_, camIdB_, keypointIdxB, outHomogeneousPoint_B, errB)) {
+  if (!computeReprojectionError4(frameB_, camIdB_, keypointIdxB, hpB, errB)) {
     isValid = false;
+    logTriangulation("rejected", "reprojection_b", errA, errB);
     return false;
   }
   if (errA > 4.0 || errB > 4.0) {
     isValid = false;
   }
+
+  logTriangulation(isValid ? "accepted" : "rejected", isValid ? "none" : "reprojection_threshold", errA, errB);
 
   // assign output
   outHomogeneousPoint_A = Eigen::Vector4d(hpA);

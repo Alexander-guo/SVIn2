@@ -43,6 +43,7 @@
 
 #include <brisk/internal/hamming.h>
 
+#include <atomic>
 #include <limits>
 #include <memory>
 #include <okvis/DenseMatcher.hpp>
@@ -161,6 +162,21 @@ class VioKeyframeWindowMatchingAlgorithm : public okvis::MatchingAlgorithm {
   /// \brief Get the number of uncertain matches.
   size_t numUncertainMatches();
 
+  /// \brief Get the number of accepted direction-only matches.
+  size_t numBearingOnlyMatches() const { return numBearingOnlyMatches_; }
+
+  /// \brief Get the number of finite landmark matches.
+  size_t numFiniteMatches() const { return numFiniteMatches_; }
+
+  /// \brief Get the number of pending tracks promoted to finite landmarks.
+  size_t numPromotions() const { return numPromotions_; }
+
+  /// \brief Get the number of geometrically rejected descriptor candidates.
+  size_t numRejectedCandidates() const { return rejectedCandidates_.load(); }
+
+  /// \brief Count direction-only track IDs still absent from the estimator.
+  size_t numActivePendingTracks() const;
+
   /// \brief access the matching result.
   const okvis::Matches& getMatches() const;
 
@@ -206,6 +222,10 @@ class VioKeyframeWindowMatchingAlgorithm : public okvis::MatchingAlgorithm {
   size_t numMatches_ = 0;
   /// The number of uncertain matches.
   size_t numUncertainMatches_ = 0;
+  size_t numBearingOnlyMatches_ = 0;
+  size_t numFiniteMatches_ = 0;
+  size_t numPromotions_ = 0;
+  mutable std::atomic<size_t> rejectedCandidates_{0};
 
   /// Focal length of camera used in frame A.
   double fA_ = 0;
@@ -252,6 +272,12 @@ class VioKeyframeWindowMatchingAlgorithm : public okvis::MatchingAlgorithm {
   bool validRelativeUncertainty_ = false;
   bool usePoseUncertainty_ = false;
   bool useSCM_ = false;
+
+  std::vector<okvis::KeypointIdentifier> trackObservations(uint64_t trackId) const;
+  bool mergePendingTracks(uint64_t targetId, uint64_t sourceId);
+  bool observationIsValid(const okvis::KeypointIdentifier& observation,
+                          const Eigen::Vector4d& homogeneousPoint_W) const;
+  size_t promoteTrack(uint64_t trackId, const Eigen::Vector4d& homogeneousPoint_W);
 
   /// \brief Calculates the distance between two descriptors.
   // copy from BriskDescriptor.hpp

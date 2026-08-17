@@ -183,7 +183,7 @@ bool ReprojectionError<GEOMETRY_T>::EvaluateWithMinimalJacobians(double const* c
     updateEvaluationState(EvaluationState::Deactivated);
     static std::atomic<uint64_t> warningCount{0};
     const uint64_t count = warningCount.fetch_add(1, std::memory_order_relaxed) + 1;
-    if (count <= 20 || count % 100 == 0) {
+    if (count <= 20 || count % 10000 == 0) {
       const char* projectionStatusName = "Unknown";
       switch (projectionStatus) {
         case cameras::CameraBase::ProjectionStatus::Successful:

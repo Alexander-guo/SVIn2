@@ -46,6 +46,31 @@ namespace okvis {
 /// \brief
 namespace triangulation {
 
+enum class TriangulationType { Rejected, BearingOnly, Finite };
+
+enum class TriangulationStatus {
+  Success,
+  InvalidInput,
+  InsufficientParallax,
+  Singular,
+  BehindRay,
+  InsufficientBaselineRangeRatio,
+  RayMismatch
+};
+
+struct TriangulationDiagnostics {
+  TriangulationType type = TriangulationType::Rejected;
+  TriangulationStatus status = TriangulationStatus::InvalidInput;
+  double parallaxAngle = 0.0;
+  double minimumParallaxAngle = 0.0;
+  double baseline = 0.0;
+  double range1 = 0.0;
+  double range2 = 0.0;
+  double baselineRangeRatio = 0.0;
+  double minimumBaselineRangeRatio = 0.0;
+  double chi2 = 0.0;
+};
+
 /**
  * @brief Triangulate the intersection of two rays.
  * @warning The rays e1 and e2 need to be normalized!
@@ -55,7 +80,9 @@ namespace triangulation {
  * @param[in]  e2 Ray through keypoint of frame B in coordinate frame A.
  * @param[in]  sigma Ray uncertainty.
  * @param[out] isValid Is the triangulation valid.
- * @param[out] isParallel Are the rays parallel?
+ * @param[out] isParallel True for a valid direction-only result. Such a result
+ *                        has w=0 and must not be inserted as a landmark until a
+ *                        later observation yields finite depth.
  * @return Homogeneous coordinates of triangulated point.
  */
 Eigen::Vector4d triangulateFast(const Eigen::Vector3d& p1,
@@ -65,6 +92,21 @@ Eigen::Vector4d triangulateFast(const Eigen::Vector3d& p1,
                                 double sigma,
                                 bool& isValid,      // NOLINT
                                 bool& isParallel);  // NOLINT
+
+/**
+ * @brief Triangulate two rays and report the geometric conditioning diagnostics.
+ *
+ * This overload preserves the original API while allowing callers which emit
+ * diagnostics to distinguish weak geometry from other rejection causes.
+ */
+Eigen::Vector4d triangulateFast(const Eigen::Vector3d& p1,
+                                const Eigen::Vector3d& e1,
+                                const Eigen::Vector3d& p2,
+                                const Eigen::Vector3d& e2,
+                                double sigma,
+                                bool& isValid,             // NOLINT
+                                bool& isParallel,          // NOLINT
+                                TriangulationDiagnostics* diagnostics);
 }  // namespace triangulation
 }  // namespace okvis
 

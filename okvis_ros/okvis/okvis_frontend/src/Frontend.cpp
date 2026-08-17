@@ -440,6 +440,14 @@ int Frontend::matchToKeyframes(okvis::Estimator& estimator,
       matcher_->match<MATCHING_ALGORITHM>(matchingAlgorithm);
       retCtr += matchingAlgorithm.numMatches();
       numUncertainMatches += matchingAlgorithm.numUncertainMatches();
+      LOG_EVERY_N(INFO, 10000) << "[BEARING_TRACK_DIAGNOSTIC] context=keyframe"
+                            << " frame_a=" << olderFrameId << " frame_b=" << currentFrameId
+                            << " camera=" << im << " matches=" << matchingAlgorithm.numMatches()
+                            << " bearing_only=" << matchingAlgorithm.numBearingOnlyMatches()
+                            << " finite=" << matchingAlgorithm.numFiniteMatches()
+                            << " promotions=" << matchingAlgorithm.numPromotions()
+                            << " rejected_candidates=" << matchingAlgorithm.numRejectedCandidates()
+                            << " active_pending=" << matchingAlgorithm.numActivePendingTracks();
     }
 
     // remove outliers
@@ -448,10 +456,13 @@ int Frontend::matchToKeyframes(okvis::Estimator& estimator,
       runRansac3d2d(estimator, params.nCameraSystem, estimator.multiFrame(currentFrameId), removeOutliers);
 
     bool rotationOnly_tmp = false;
-    // do RANSAC 2D2D for initialization only
-    if (!isInitialized_) {
-      runRansac2d2d(estimator, params, currentFrameId, olderFrameId, true, removeOutliers, rotationOnly_tmp);
-    }
+    // Pending bearing tracks remain useful for rotation/relative-pose outlier
+    // rejection after initialization, but only initialize the pose at startup.
+    const int bearingRansacInliers = runRansac2d2d(
+        estimator, params, currentFrameId, olderFrameId, !isInitialized_, removeOutliers, rotationOnly_tmp);
+    LOG_EVERY_N(INFO, 10000) << "[BEARING_RANSAC_DIAGNOSTIC] context=keyframe"
+                          << " frame_a=" << olderFrameId << " frame_b=" << currentFrameId
+                          << " inliers=" << bearingRansacInliers << " rotation_only=" << rotationOnly_tmp;
     // Sharmin: commented for scale
     if (firstFrame) {
       rotationOnly = rotationOnly_tmp;
@@ -464,7 +475,8 @@ int Frontend::matchToKeyframes(okvis::Estimator& estimator,
 
   // calculate fraction of safe matches
   if (uncertainMatchFraction) {
-    *uncertainMatchFraction = static_cast<double>(numUncertainMatches) / static_cast<double>(retCtr);
+    *uncertainMatchFraction =
+        retCtr > 0 ? static_cast<double>(numUncertainMatches) / static_cast<double>(retCtr) : 0.0;
   }
 
   return retCtr;
@@ -515,13 +527,24 @@ int Frontend::matchToLastFrame(okvis::Estimator& estimator,
     // match 2D-2D for initialization of new (mono-)correspondences
     matcher_->match<MATCHING_ALGORITHM>(matchingAlgorithm);
     retCtr += matchingAlgorithm.numMatches();
+    LOG_EVERY_N(INFO, 10000) << "[BEARING_TRACK_DIAGNOSTIC] context=last_frame"
+                          << " frame_a=" << lastFrameId << " frame_b=" << currentFrameId
+                          << " camera=" << im << " matches=" << matchingAlgorithm.numMatches()
+                          << " bearing_only=" << matchingAlgorithm.numBearingOnlyMatches()
+                          << " finite=" << matchingAlgorithm.numFiniteMatches()
+                          << " promotions=" << matchingAlgorithm.numPromotions()
+                          << " rejected_candidates=" << matchingAlgorithm.numRejectedCandidates()
+                          << " active_pending=" << matchingAlgorithm.numActivePendingTracks();
     // LOG(INFO) << "Number of matches to last frame (2D-2D): " << matchingAlgorithm.numMatches();
   }
 
   // remove outliers
   bool rotationOnly = false;
-  if (!isInitialized_)
-    runRansac2d2d(estimator, params, currentFrameId, lastFrameId, false, removeOutliers, rotationOnly);
+  const int bearingRansacInliers =
+      runRansac2d2d(estimator, params, currentFrameId, lastFrameId, false, removeOutliers, rotationOnly);
+    LOG_EVERY_N(INFO, 10000) << "[BEARING_RANSAC_DIAGNOSTIC] context=last_frame"
+                        << " frame_a=" << lastFrameId << " frame_b=" << currentFrameId
+                        << " inliers=" << bearingRansacInliers << " rotation_only=" << rotationOnly;
 
   return retCtr;
 }
@@ -999,9 +1022,9 @@ int Frontend::runRansac2d2d(okvis::Estimator& estimator,
     for (size_t k = 0; k < numCorrespondences; ++k) {
       size_t idxB = adapter.getMatchKeypointIdxB(k);
       if (!inliers[k]) {
-        uint64_t lmId = multiFrame->landmarkId(im, k);
+        uint64_t lmId = multiFrame->landmarkId(im, idxB);
         // reset ID:
-        multiFrame->setLandmarkId(im, k, 0);
+        multiFrame->setLandmarkId(im, idxB, 0);
         // remove observation
         if (removeOutliers) {
           if (lmId != 0 && estimator.isLandmarkAdded(lmId)) {

@@ -57,6 +57,7 @@ if(BUILD_TESTS)
   set(PROJECT_TEST_NAME ${PROJECT_NAME}_test)
   add_executable(${PROJECT_TEST_NAME}
     test/runTests.cpp
+    test/TestDeferredBearingTracks.cpp
     test/TestStereoTriangulation.cpp
   )
   target_link_libraries(${PROJECT_TEST_NAME}
