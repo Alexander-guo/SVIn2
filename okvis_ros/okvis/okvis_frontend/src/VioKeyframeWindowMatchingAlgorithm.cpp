@@ -46,7 +46,10 @@
 
 // cameras and distortions
 #include <algorithm>
+#include <cmath>
+#include <Eigen/Eigenvalues>
 #include <map>
+#include <numeric>
 #include <set>
 #include <okvis/cameras/DoubleSphereCamera.hpp>
 #include <okvis/cameras/EquidistantDistortion.hpp>
@@ -155,6 +158,10 @@ void VioKeyframeWindowMatchingAlgorithm<CAMERA_GEOMETRY_T>::doSetup() {
   numBearingOnlyMatches_ = 0;
   numFiniteMatches_ = 0;
   numPromotions_ = 0;
+  numPromotionAttempts_ = 0;
+  numPromotionDeferredObservations_ = 0;
+  numPromotionDeferredFrames_ = 0;
+  numPromotionDeferredParallax_ = 0;
   rejectedCandidates_.store(0, std::memory_order_relaxed);
 
   const size_t numA = frameA_->numKeypoints(camIdA_);
@@ -373,19 +380,206 @@ bool VioKeyframeWindowMatchingAlgorithm<CAMERA_GEOMETRY_T>::observationIsValid(
 template <class CAMERA_GEOMETRY_T>
 size_t VioKeyframeWindowMatchingAlgorithm<CAMERA_GEOMETRY_T>::promoteTrack(
     uint64_t trackId,
-    const Eigen::Vector4d& homogeneousPoint_W) {
-  std::vector<okvis::KeypointIdentifier> validObservations;
+    const Eigen::Vector4d& /*homogeneousPoint_W*/) {
+  constexpr size_t kMinimumPromotionObservations = 3;
+  constexpr size_t kMinimumPromotionFrames = 3;
+  constexpr double kMinimumPromotionParallaxRadians = 0.25 * M_PI / 180.0;
+
+  ++numPromotionAttempts_;
   const std::vector<okvis::KeypointIdentifier> observations = trackObservations(trackId);
-  validObservations.reserve(observations.size());
+
+  struct BearingObservation {
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+    okvis::KeypointIdentifier identifier;
+    Eigen::Vector3d cameraCenter_W;
+    Eigen::Vector3d ray_W;
+  };
+  std::vector<BearingObservation, Eigen::aligned_allocator<BearingObservation>> bearingObservations;
+  bearingObservations.reserve(observations.size());
+  std::set<uint64_t> distinctFrames;
+  double minimumTimestamp = std::numeric_limits<double>::infinity();
+  double maximumTimestamp = -std::numeric_limits<double>::infinity();
+
   for (const okvis::KeypointIdentifier& observation : observations) {
-    if (observationIsValid(observation, homogeneousPoint_W)) {
-      validObservations.push_back(observation);
-    } else {
+    const std::shared_ptr<okvis::MultiFrame> multiFrame = estimator_->multiFrame(observation.frameId);
+    okvis::kinematics::Transformation T_WS;
+    okvis::kinematics::Transformation T_SC;
+    Eigen::Vector2d measurement;
+    Eigen::Vector3d ray_C;
+    if (!estimator_->get_T_WS(observation.frameId, T_WS) ||
+        !estimator_->getCameraSensorStates(observation.frameId, observation.cameraIndex, T_SC)) {
+      continue;
+    }
+    if (!multiFrame->getKeypoint(observation.cameraIndex, observation.keypointIndex, measurement) ||
+        !measurement.allFinite() ||
+        !multiFrame->geometryAs<camera_geometry_t>(observation.cameraIndex)
+             ->backProject(measurement, &ray_C) ||
+        !ray_C.allFinite() || !(ray_C.norm() > 1.0e-12)) {
+      continue;
+    }
+    const okvis::kinematics::Transformation T_WC = T_WS * T_SC;
+    const Eigen::Vector3d cameraCenter_W = T_WC.r();
+    const Eigen::Vector3d ray_W = (T_WC.C() * ray_C).normalized();
+    if (!cameraCenter_W.allFinite() || !ray_W.allFinite()) continue;
+
+    bearingObservations.push_back({observation, cameraCenter_W, ray_W});
+    distinctFrames.insert(observation.frameId);
+    const double timestamp = multiFrame->timestamp().toSec();
+    minimumTimestamp = std::min(minimumTimestamp, timestamp);
+    maximumTimestamp = std::max(maximumTimestamp, timestamp);
+  }
+
+  double maximumBaseline = 0.0;
+  double maximumParallax = 0.0;
+  for (size_t i = 0; i < bearingObservations.size(); ++i) {
+    for (size_t j = i + 1; j < bearingObservations.size(); ++j) {
+      maximumBaseline = std::max(
+          maximumBaseline,
+          (bearingObservations[i].cameraCenter_W - bearingObservations[j].cameraCenter_W).norm());
+      const double crossNorm = bearingObservations[i].ray_W.cross(bearingObservations[j].ray_W).norm();
+      const double dot = std::max(
+          -1.0, std::min(1.0, bearingObservations[i].ray_W.dot(bearingObservations[j].ray_W)));
+      maximumParallax = std::max(maximumParallax, std::atan2(crossNorm, dot));
+    }
+  }
+
+  // Find the point closest to all viewing rays. This is a joint multiview
+  // estimate; the latest two-view triangulation only triggers this attempt and
+  // is deliberately not used as the depth seed.
+  const auto triangulateRays = [&](const std::vector<size_t>& indices,
+                                   Eigen::Vector3d& point_W) {
+    Eigen::Matrix3d normalMatrix = Eigen::Matrix3d::Zero();
+    Eigen::Vector3d rightHandSide = Eigen::Vector3d::Zero();
+    for (const size_t index : indices) {
+      const BearingObservation& observation = bearingObservations[index];
+      const Eigen::Matrix3d perpendicular =
+          Eigen::Matrix3d::Identity() - observation.ray_W * observation.ray_W.transpose();
+      normalMatrix += perpendicular;
+      rightHandSide += perpendicular * observation.cameraCenter_W;
+    }
+    const Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> eigenSolver(normalMatrix);
+    if (eigenSolver.info() != Eigen::Success || !eigenSolver.eigenvalues().allFinite() ||
+        !(eigenSolver.eigenvalues().minCoeff() > 1.0e-12)) {
+      return false;
+    }
+    point_W = eigenSolver.eigenvectors() *
+              eigenSolver.eigenvalues().cwiseInverse().asDiagonal() *
+              eigenSolver.eigenvectors().transpose() * rightHandSide;
+    return point_W.allFinite();
+  };
+
+  std::vector<size_t> allIndices(bearingObservations.size());
+  std::iota(allIndices.begin(), allIndices.end(), 0);
+  Eigen::Vector3d point_W = Eigen::Vector3d::Zero();
+  bool finitePoint = triangulateRays(allIndices, point_W);
+  Eigen::Vector4d homogeneousPoint_W(point_W.x(), point_W.y(), point_W.z(), 1.0);
+
+  std::vector<size_t> inlierIndices;
+  std::vector<okvis::KeypointIdentifier> validObservations;
+  if (finitePoint) {
+    inlierIndices.reserve(bearingObservations.size());
+    for (size_t i = 0; i < bearingObservations.size(); ++i) {
+      const double signedDistance =
+          (point_W - bearingObservations[i].cameraCenter_W).dot(bearingObservations[i].ray_W);
+      if (std::isfinite(signedDistance) && signedDistance > 0.0 &&
+          observationIsValid(bearingObservations[i].identifier, homogeneousPoint_W)) {
+        inlierIndices.push_back(i);
+      }
+    }
+
+    // Refit once using only geometrically consistent observations, then make
+    // the final inlier decision against the refined point.
+    Eigen::Vector3d refinedPoint_W;
+    if (inlierIndices.size() >= kMinimumPromotionObservations &&
+        triangulateRays(inlierIndices, refinedPoint_W)) {
+      point_W = refinedPoint_W;
+      homogeneousPoint_W << point_W, 1.0;
+      validObservations.clear();
+      for (const size_t index : inlierIndices) {
+        const double signedDistance =
+            (point_W - bearingObservations[index].cameraCenter_W)
+                .dot(bearingObservations[index].ray_W);
+        if (std::isfinite(signedDistance) && signedDistance > 0.0 &&
+            observationIsValid(bearingObservations[index].identifier, homogeneousPoint_W)) {
+          validObservations.push_back(bearingObservations[index].identifier);
+        }
+      }
+    }
+  }
+
+  double minimumRange = std::numeric_limits<double>::infinity();
+  double maximumRange = 0.0;
+  if (finitePoint) {
+    for (const BearingObservation& observation : bearingObservations) {
+      const double range = (point_W - observation.cameraCenter_W).norm();
+      if (std::isfinite(range) && range > 0.0) {
+        minimumRange = std::min(minimumRange, range);
+        maximumRange = std::max(maximumRange, range);
+      }
+    }
+  }
+
+  const double frameSpanSeconds =
+      std::isfinite(minimumTimestamp) && std::isfinite(maximumTimestamp)
+          ? maximumTimestamp - minimumTimestamp
+          : 0.0;
+  const double baselineRangeRatio =
+      maximumRange > 0.0 ? maximumBaseline / maximumRange : 0.0;
+
+  const char* decision = "promoted";
+  bool canPromote = true;
+  if (!finitePoint || bearingObservations.size() != observations.size()) {
+    decision = "invalid_geometry";
+    canPromote = false;
+    ++numPromotionDeferredObservations_;
+  } else if (bearingObservations.size() < kMinimumPromotionObservations) {
+    decision = "insufficient_observations";
+    canPromote = false;
+    ++numPromotionDeferredObservations_;
+  } else if (distinctFrames.size() < kMinimumPromotionFrames) {
+    decision = "insufficient_distinct_frames";
+    canPromote = false;
+    ++numPromotionDeferredFrames_;
+  } else if (!(maximumParallax >= kMinimumPromotionParallaxRadians)) {
+    decision = "insufficient_multiview_parallax";
+    canPromote = false;
+    ++numPromotionDeferredParallax_;
+  } else if (validObservations.size() < kMinimumPromotionObservations) {
+    decision = "insufficient_multiview_inliers";
+    canPromote = false;
+    ++numPromotionDeferredObservations_;
+  }
+
+  static std::atomic<uint64_t> promotionDiagnosticCount{0};
+  const uint64_t diagnosticCount =
+      promotionDiagnosticCount.fetch_add(1, std::memory_order_relaxed) + 1;
+  if (diagnosticCount <= 50 || diagnosticCount % 1000 == 0) {
+    LOG(INFO) << "[PROMOTION_DIAGNOSTIC] event=" << diagnosticCount
+              << " track_id=" << trackId << " decision=" << decision
+              << " observations_total=" << observations.size()
+              << " bearing_observations=" << bearingObservations.size()
+              << " observations_valid=" << validObservations.size()
+              << " distinct_frames=" << distinctFrames.size()
+              << " frame_span_s=" << frameSpanSeconds
+              << " baseline_m=" << maximumBaseline
+              << " range_min_m=" << (std::isfinite(minimumRange) ? minimumRange : 0.0)
+              << " range_max_m=" << maximumRange
+              << " baseline_range_ratio=" << baselineRangeRatio
+              << " parallax_deg=" << maximumParallax * 180.0 / M_PI
+              << " required_parallax_deg=" << kMinimumPromotionParallaxRadians * 180.0 / M_PI;
+  }
+  if (!canPromote) return 0;
+
+  // Associations are intentionally preserved for every deferred attempt. Once
+  // promotion succeeds, discard only observations rejected by the joint fit.
+  const std::set<okvis::KeypointIdentifier> validObservationSet(
+      validObservations.begin(), validObservations.end());
+  for (const okvis::KeypointIdentifier& observation : observations) {
+    if (validObservationSet.count(observation) == 0) {
       estimator_->multiFrame(observation.frameId)
           ->setLandmarkId(observation.cameraIndex, observation.keypointIndex, 0);
     }
   }
-  if (validObservations.size() < 2) return 0;
 
   if (!estimator_->isLandmarkAdded(trackId)) {
     if (!estimator_->addLandmark(trackId, homogeneousPoint_W)) return 0;

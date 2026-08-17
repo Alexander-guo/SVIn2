@@ -446,6 +446,11 @@ int Frontend::matchToKeyframes(okvis::Estimator& estimator,
                             << " bearing_only=" << matchingAlgorithm.numBearingOnlyMatches()
                             << " finite=" << matchingAlgorithm.numFiniteMatches()
                             << " promotions=" << matchingAlgorithm.numPromotions()
+                            << " promotion_attempts=" << matchingAlgorithm.numPromotionAttempts()
+                            << " deferred_observations="
+                            << matchingAlgorithm.numPromotionDeferredObservations()
+                            << " deferred_frames=" << matchingAlgorithm.numPromotionDeferredFrames()
+                            << " deferred_parallax=" << matchingAlgorithm.numPromotionDeferredParallax()
                             << " rejected_candidates=" << matchingAlgorithm.numRejectedCandidates()
                             << " active_pending=" << matchingAlgorithm.numActivePendingTracks();
     }
@@ -533,6 +538,11 @@ int Frontend::matchToLastFrame(okvis::Estimator& estimator,
                           << " bearing_only=" << matchingAlgorithm.numBearingOnlyMatches()
                           << " finite=" << matchingAlgorithm.numFiniteMatches()
                           << " promotions=" << matchingAlgorithm.numPromotions()
+                          << " promotion_attempts=" << matchingAlgorithm.numPromotionAttempts()
+                          << " deferred_observations="
+                          << matchingAlgorithm.numPromotionDeferredObservations()
+                          << " deferred_frames=" << matchingAlgorithm.numPromotionDeferredFrames()
+                          << " deferred_parallax=" << matchingAlgorithm.numPromotionDeferredParallax()
                           << " rejected_candidates=" << matchingAlgorithm.numRejectedCandidates()
                           << " active_pending=" << matchingAlgorithm.numActivePendingTracks();
     // LOG(INFO) << "Number of matches to last frame (2D-2D): " << matchingAlgorithm.numMatches();

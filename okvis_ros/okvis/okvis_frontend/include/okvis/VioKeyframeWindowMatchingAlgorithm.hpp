@@ -171,6 +171,23 @@ class VioKeyframeWindowMatchingAlgorithm : public okvis::MatchingAlgorithm {
   /// \brief Get the number of pending tracks promoted to finite landmarks.
   size_t numPromotions() const { return numPromotions_; }
 
+  /// \brief Get the number of finite-depth candidates evaluated for promotion.
+  size_t numPromotionAttempts() const { return numPromotionAttempts_; }
+
+  /// \brief Get the number of candidates deferred because fewer than three
+  /// valid observations survived reprojection validation.
+  size_t numPromotionDeferredObservations() const {
+    return numPromotionDeferredObservations_;
+  }
+
+  /// \brief Get the number of candidates deferred because the valid
+  /// observations did not span three distinct frames.
+  size_t numPromotionDeferredFrames() const { return numPromotionDeferredFrames_; }
+
+  /// \brief Get the number of candidates deferred because multiview parallax
+  /// remained below the promotion threshold.
+  size_t numPromotionDeferredParallax() const { return numPromotionDeferredParallax_; }
+
   /// \brief Get the number of geometrically rejected descriptor candidates.
   size_t numRejectedCandidates() const { return rejectedCandidates_.load(); }
 
@@ -225,6 +242,10 @@ class VioKeyframeWindowMatchingAlgorithm : public okvis::MatchingAlgorithm {
   size_t numBearingOnlyMatches_ = 0;
   size_t numFiniteMatches_ = 0;
   size_t numPromotions_ = 0;
+  size_t numPromotionAttempts_ = 0;
+  size_t numPromotionDeferredObservations_ = 0;
+  size_t numPromotionDeferredFrames_ = 0;
+  size_t numPromotionDeferredParallax_ = 0;
   mutable std::atomic<size_t> rejectedCandidates_{0};
 
   /// Focal length of camera used in frame A.

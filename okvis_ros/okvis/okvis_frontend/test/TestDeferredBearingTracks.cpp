@@ -146,6 +146,97 @@ TEST_F(DeferredBearingTracksTest, PromotesPendingTrackWhenFiniteDepthBecomesObse
               0.0, 1.0e-6);
 }
 
+TEST_F(DeferredBearingTracksTest, DefersFiniteDepthUntilThreeFramesConfirmIt) {
+  const Eigen::Vector3d point_W(0.0, 0.0, 1.0);
+  Eigen::Vector2d measurementA;
+  Eigen::Vector2d measurementB;
+  Eigen::Vector2d measurementC;
+  ASSERT_EQ(camera_->project(point_W, &measurementA),
+            okvis::cameras::CameraBase::ProjectionStatus::Successful);
+  ASSERT_EQ(camera_->project(point_W - Eigen::Vector3d(0.1, 0.0, 0.0), &measurementB),
+            okvis::cameras::CameraBase::ProjectionStatus::Successful);
+  ASSERT_EQ(camera_->project(point_W - Eigen::Vector3d(0.2, 0.0, 0.0), &measurementC),
+            okvis::cameras::CameraBase::ProjectionStatus::Successful);
+
+  const okvis::MultiFramePtr frameA = makeFrame(0.0, measurementA);
+  const okvis::MultiFramePtr frameB = makeFrame(0.1, measurementB);
+  estimator_.set_T_WS(
+      frameB->id(),
+      okvis::kinematics::Transformation(Eigen::Vector3d(0.1, 0.0, 0.0),
+                                        Eigen::Quaterniond::Identity()));
+
+  MatchingAlgorithm twoFrameMatcher(estimator_, MatchingAlgorithm::Match2D2D, 80.0f, false);
+  twoFrameMatcher.setFrames(frameA->id(), frameB->id(), 0, 0);
+  twoFrameMatcher.doSetup();
+  twoFrameMatcher.setBestMatch(0, 0, 0.0);
+
+  const uint64_t trackId = frameA->landmarkId(0, 0);
+  ASSERT_NE(trackId, 0u);
+  EXPECT_EQ(frameB->landmarkId(0, 0), trackId);
+  EXPECT_FALSE(estimator_.isLandmarkAdded(trackId));
+  EXPECT_EQ(twoFrameMatcher.numPromotionAttempts(), 1u);
+  EXPECT_EQ(twoFrameMatcher.numPromotionDeferredObservations(), 1u);
+  EXPECT_EQ(twoFrameMatcher.numPromotions(), 0u);
+
+  const okvis::MultiFramePtr frameC = makeFrame(0.2, measurementC);
+  estimator_.set_T_WS(
+      frameC->id(),
+      okvis::kinematics::Transformation(Eigen::Vector3d(0.2, 0.0, 0.0),
+                                        Eigen::Quaterniond::Identity()));
+  MatchingAlgorithm threeFrameMatcher(estimator_, MatchingAlgorithm::Match2D2D, 80.0f, false);
+  threeFrameMatcher.setFrames(frameA->id(), frameC->id(), 0, 0);
+  threeFrameMatcher.doSetup();
+  threeFrameMatcher.setBestMatch(0, 0, 0.0);
+
+  EXPECT_EQ(frameC->landmarkId(0, 0), trackId);
+  EXPECT_TRUE(estimator_.isLandmarkAdded(trackId));
+  EXPECT_EQ(threeFrameMatcher.numPromotionAttempts(), 1u);
+  EXPECT_EQ(threeFrameMatcher.numPromotions(), 1u);
+}
+
+TEST_F(DeferredBearingTracksTest, PreservesPendingAssociationsWhenJointPromotionFails) {
+  const Eigen::Vector3d point_W(0.0, 0.0, 1.0);
+  Eigen::Vector2d measurementA;
+  Eigen::Vector2d measurementB;
+  Eigen::Vector2d measurementC;
+  ASSERT_EQ(camera_->project(point_W, &measurementA),
+            okvis::cameras::CameraBase::ProjectionStatus::Successful);
+  ASSERT_EQ(camera_->project(point_W - Eigen::Vector3d(0.05, 0.0, 0.0), &measurementB),
+            okvis::cameras::CameraBase::ProjectionStatus::Successful);
+  ASSERT_EQ(camera_->project(point_W - Eigen::Vector3d(0.1, 0.0, 0.0), &measurementC),
+            okvis::cameras::CameraBase::ProjectionStatus::Successful);
+  // Make the historical observation inconsistent with the track. The joint
+  // estimate must be deferred without destroying its pending association.
+  measurementB.x() += 100.0;
+
+  const okvis::MultiFramePtr frameA = makeFrame(0.0, measurementA);
+  const okvis::MultiFramePtr frameB = makeFrame(0.1, measurementB);
+  const okvis::MultiFramePtr frameC = makeFrame(0.2, measurementC);
+  estimator_.set_T_WS(
+      frameB->id(),
+      okvis::kinematics::Transformation(Eigen::Vector3d(0.05, 0.0, 0.0),
+                                        Eigen::Quaterniond::Identity()));
+  estimator_.set_T_WS(
+      frameC->id(),
+      okvis::kinematics::Transformation(Eigen::Vector3d(0.1, 0.0, 0.0),
+                                        Eigen::Quaterniond::Identity()));
+
+  const uint64_t trackId = okvis::IdProvider::instance().newId();
+  frameA->setLandmarkId(0, 0, trackId);
+  frameB->setLandmarkId(0, 0, trackId);
+
+  MatchingAlgorithm matcher(estimator_, MatchingAlgorithm::Match2D2D, 80.0f, false);
+  matcher.setFrames(frameA->id(), frameC->id(), 0, 0);
+  matcher.doSetup();
+  matcher.setBestMatch(0, 0, 0.0);
+
+  EXPECT_FALSE(estimator_.isLandmarkAdded(trackId));
+  EXPECT_EQ(matcher.numPromotions(), 0u);
+  EXPECT_EQ(frameA->landmarkId(0, 0), trackId);
+  EXPECT_EQ(frameB->landmarkId(0, 0), trackId);
+  EXPECT_EQ(frameC->landmarkId(0, 0), trackId);
+}
+
 TEST_F(DeferredBearingTracksTest, DoesNotMergeTracksThatConflictInOneImage) {
   Eigen::Vector2d center;
   ASSERT_EQ(camera_->project(Eigen::Vector3d::UnitZ(), &center),
