@@ -822,7 +822,7 @@ int Frontend::runRansac2d2dToRefineScale(okvis::Estimator& estimator,
   // create a RelativePoseSac problem and RANSAC
   typedef opengv::sac_problems::relative_pose::FrameRotationOnlySacProblem FrameRotationOnlySacProblem;
   opengv::sac::Ransac<FrameRotationOnlySacProblem> rotation_only_ransac;
-  std::shared_ptr<FrameRotationOnlySacProblem> rotation_only_problem_ptr(new FrameRotationOnlySacProblem(adapter));
+  std::shared_ptr<FrameRotationOnlySacProblem> rotation_only_problem_ptr(new FrameRotationOnlySacProblem(adapter, false));
   rotation_only_ransac.sac_model_ = rotation_only_problem_ptr;
   rotation_only_ransac.threshold_ = 9;
   rotation_only_ransac.max_iterations_ = 50;
@@ -838,7 +838,7 @@ int Frontend::runRansac2d2dToRefineScale(okvis::Estimator& estimator,
   typedef opengv::sac_problems::relative_pose::FrameRelativePoseSacProblem FrameRelativePoseSacProblem;
   opengv::sac::Ransac<FrameRelativePoseSacProblem> rel_pose_ransac;
   std::shared_ptr<FrameRelativePoseSacProblem> rel_pose_problem_ptr(
-      new FrameRelativePoseSacProblem(adapter, FrameRelativePoseSacProblem::STEWENIUS));
+      new FrameRelativePoseSacProblem(adapter, FrameRelativePoseSacProblem::STEWENIUS, false));
   rel_pose_ransac.sac_model_ = rel_pose_problem_ptr;
   rel_pose_ransac.threshold_ = 9;  // (1.0 - cos(0.5/600));
   rel_pose_ransac.max_iterations_ = 50;
@@ -972,7 +972,7 @@ int Frontend::runRansac2d2d(okvis::Estimator& estimator,
     // create a RelativePoseSac problem and RANSAC
     typedef opengv::sac_problems::relative_pose::FrameRotationOnlySacProblem FrameRotationOnlySacProblem;
     opengv::sac::Ransac<FrameRotationOnlySacProblem> rotation_only_ransac;
-    std::shared_ptr<FrameRotationOnlySacProblem> rotation_only_problem_ptr(new FrameRotationOnlySacProblem(adapter));
+    std::shared_ptr<FrameRotationOnlySacProblem> rotation_only_problem_ptr(new FrameRotationOnlySacProblem(adapter, false));
     rotation_only_ransac.sac_model_ = rotation_only_problem_ptr;
     rotation_only_ransac.threshold_ = 9;
     rotation_only_ransac.max_iterations_ = 50;
@@ -988,7 +988,7 @@ int Frontend::runRansac2d2d(okvis::Estimator& estimator,
     typedef opengv::sac_problems::relative_pose::FrameRelativePoseSacProblem FrameRelativePoseSacProblem;
     opengv::sac::Ransac<FrameRelativePoseSacProblem> rel_pose_ransac;
     std::shared_ptr<FrameRelativePoseSacProblem> rel_pose_problem_ptr(
-        new FrameRelativePoseSacProblem(adapter, FrameRelativePoseSacProblem::STEWENIUS));
+        new FrameRelativePoseSacProblem(adapter, FrameRelativePoseSacProblem::STEWENIUS, false));
     rel_pose_ransac.sac_model_ = rel_pose_problem_ptr;
     rel_pose_ransac.threshold_ = 9;  // (1.0 - cos(0.5/600));
     rel_pose_ransac.max_iterations_ = 50;

@@ -83,10 +83,13 @@ class FrameRelativePoseSacProblem : public CentralRelativePoseSacProblem {
    * \brief FrameRelativePoseSacProblem
    * \param[in] adapter Visitor holding bearing vector correspondences etc.
    * \param[in] algorithm The algorithm we want to use.
+   * \param[in] randomSeed Forwarded to OpenGV; false selects its local fixed seed.
    * @warning Only okvis::relative_pose::FrameRelativeAdapter supported.
    */
-  FrameRelativePoseSacProblem(adapter_t& adapter, algorithm_t algorithm)  // NOLINT
-      : base_t(adapter, algorithm),
+  FrameRelativePoseSacProblem(adapter_t& adapter,
+                              algorithm_t algorithm,
+                              bool randomSeed = true)  // NOLINT
+      : base_t(adapter, algorithm, randomSeed),
         adapterDerived_(*static_cast<opengv::relative_pose::FrameRelativeAdapter*>(&_adapter)) {
     OKVIS_ASSERT_TRUE(Exception,
                       dynamic_cast<opengv::relative_pose::FrameRelativeAdapter*>(&_adapter),
@@ -97,12 +100,16 @@ class FrameRelativePoseSacProblem : public CentralRelativePoseSacProblem {
    * \brief FrameRelativePoseSacProblem
    * \param[in] adapter Visitor holding bearing vector correspondences etc.
    * \param[in] algorithm The algorithm we want to use.
+   * \param[in] randomSeed Forwarded to OpenGV; false selects its local fixed seed.
    * \param[in] indices A vector of indices to be used from all available
    *                    correspondences.
    * @warning Only okvis::relative_pose::FrameRelativeAdapter supported.
    */
-  FrameRelativePoseSacProblem(adapter_t& adapter, algorithm_t algorithm, const std::vector<int>& indices)  // NOLINT
-      : base_t(adapter, algorithm, indices),
+  FrameRelativePoseSacProblem(adapter_t& adapter,
+                              algorithm_t algorithm,
+                              const std::vector<int>& indices,
+                              bool randomSeed = true)  // NOLINT
+      : base_t(adapter, algorithm, indices, randomSeed),
         adapterDerived_(*static_cast<opengv::relative_pose::FrameRelativeAdapter*>(&_adapter)) {
     OKVIS_ASSERT_TRUE(Exception,
                       dynamic_cast<opengv::relative_pose::FrameRelativeAdapter*>(&_adapter),

@@ -79,10 +79,11 @@ class FrameRotationOnlySacProblem : public RotationOnlySacProblem {
   /**
    * \brief Constructor.
    * \param[in] adapter Visitor holding bearing vector correspondences etc.
+   * \param[in] randomSeed Forwarded to OpenGV; false selects its local fixed seed.
    * @warning Only okvis::relative_pose::FrameRelativeAdapter supported.
    */
-  explicit FrameRotationOnlySacProblem(adapter_t& adapter)  // NOLINT
-      : base_t(adapter), adapterDerived_(*static_cast<opengv::relative_pose::FrameRelativeAdapter*>(&_adapter)) {
+  explicit FrameRotationOnlySacProblem(adapter_t& adapter, bool randomSeed = true)  // NOLINT
+      : base_t(adapter, randomSeed), adapterDerived_(*static_cast<opengv::relative_pose::FrameRelativeAdapter*>(&_adapter)) {
     OKVIS_ASSERT_TRUE(Exception,
                       dynamic_cast<opengv::relative_pose::FrameRelativeAdapter*>(&_adapter),
                       "only opengv::absolute_pose::FrameRelativeAdapter supported");
@@ -91,12 +92,15 @@ class FrameRotationOnlySacProblem : public RotationOnlySacProblem {
   /**
    * \brief Constructor.
    * \param[in] adapter Visitor holding bearing vector correspondences etc.
+   * \param[in] randomSeed Forwarded to OpenGV; false selects its local fixed seed.
    * \param[in] indices A vector of indices to be used from all available
    *                    correspondences.
    * @warning Only okvis::relative_pose::FrameRelativeAdapter supported.
    */
-  FrameRotationOnlySacProblem(adapter_t& adapter, const std::vector<int>& indices)  // NOLINT
-      : base_t(adapter, indices),
+  FrameRotationOnlySacProblem(adapter_t& adapter,
+                              const std::vector<int>& indices,
+                              bool randomSeed = true)  // NOLINT
+      : base_t(adapter, indices, randomSeed),
         adapterDerived_(*static_cast<opengv::relative_pose::FrameRelativeAdapter*>(&_adapter)) {
     OKVIS_ASSERT_TRUE(Exception,
                       dynamic_cast<opengv::relative_pose::FrameRelativeAdapter*>(&_adapter),

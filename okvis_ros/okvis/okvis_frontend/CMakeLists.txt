@@ -59,6 +59,7 @@ if(BUILD_TESTS)
     test/runTests.cpp
     test/TestDeferredBearingTracks.cpp
     test/TestDeterministicFeatureProduction.cpp
+    test/TestDeterministicOpenGVRansac.cpp
     test/TestStereoTriangulation.cpp
   )
   target_link_libraries(${PROJECT_TEST_NAME}
