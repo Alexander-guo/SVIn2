@@ -33,5 +33,42 @@
 
 #include "okvis/ImuFrameSynchronizer.hpp"
 
+#include <chrono>
+#include <future>
+#include <thread>
+
 /// \brief okvis Main namespace of this package.
 namespace okvis {} /* namespace okvis */
+
+TEST(ImuFrameSynchronizerTest, AlreadyPublishedBoundaryIsObservedWithoutASecondNotification) {
+  okvis::ImuFrameSynchronizer synchronizer;
+  const okvis::Time frameStamp(10, 0);
+  synchronizer.gotImuData(frameStamp);
+
+  const std::future<bool> result =
+      std::async(std::launch::async, [&synchronizer, &frameStamp]() {
+        return synchronizer.waitForUpToDateImuData(frameStamp);
+      });
+
+  ASSERT_EQ(result.wait_for(std::chrono::milliseconds(100)), std::future_status::ready);
+  EXPECT_TRUE(result.get());
+}
+
+TEST(ImuFrameSynchronizerTest, ConcurrentWaitersObserveTheSameMonotonicTimestamp) {
+  okvis::ImuFrameSynchronizer synchronizer;
+  const okvis::Time frameStamp(20, 0);
+  std::future<bool> first = std::async(std::launch::async, [&synchronizer, &frameStamp]() {
+    return synchronizer.waitForUpToDateImuData(frameStamp);
+  });
+  std::future<bool> second = std::async(std::launch::async, [&synchronizer, &frameStamp]() {
+    return synchronizer.waitForUpToDateImuData(frameStamp);
+  });
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  synchronizer.gotImuData(frameStamp);
+
+  ASSERT_EQ(first.wait_for(std::chrono::milliseconds(100)), std::future_status::ready);
+  ASSERT_EQ(second.wait_for(std::chrono::milliseconds(100)), std::future_status::ready);
+  EXPECT_TRUE(first.get());
+  EXPECT_TRUE(second.get());
+}

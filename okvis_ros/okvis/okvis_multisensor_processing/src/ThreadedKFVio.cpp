@@ -44,6 +44,7 @@
 #include <list>
 #include <map>
 #include <memory>
+#include <sstream>
 #include <okvis/ThreadedKFVio.hpp>
 #include <okvis/assert_macros.hpp>
 #include <okvis/cameras/PinholeCamera.hpp>               // Sharmin
@@ -98,6 +99,8 @@ ThreadedKFVio::ThreadedKFVio(okvis::VioParameters& parameters,
       frameSynchronizer_(okvis::FrameSynchronizer(parameters)),
       lastAddedImageTimestamp_(okvis::Time(0, 0)),
       optimizationDone_(true),
+      featureStateReadyThrough_(okvis::Time(0, 0)),
+      shutdownRequested_(false),
       estimator_(estimator),
       frontend_(frontend),
       parameters_(parameters),
@@ -113,6 +116,8 @@ ThreadedKFVio::ThreadedKFVio(okvis::VioParameters& parameters)
       frameSynchronizer_(okvis::FrameSynchronizer(parameters)),
       lastAddedImageTimestamp_(okvis::Time(0, 0)),
       optimizationDone_(true),
+      featureStateReadyThrough_(okvis::Time(0, 0)),
+      shutdownRequested_(false),
       estimator_(),
       frontend_(parameters.nCameraSystem.numCameras()),
       parameters_(parameters),
@@ -196,6 +201,8 @@ void ThreadedKFVio::startThreads() {
 
 // Destructor. This calls Shutdown() for all threadsafe queues and joins all threads.
 ThreadedKFVio::~ThreadedKFVio() {
+  shutdownRequested_ = true;
+  featureStateNotification_.notify_all();
   for (size_t i = 0; i < numCameras_; ++i) {
     cameraMeasurementsReceived_.at(i)->Shutdown();
   }
@@ -284,7 +291,9 @@ bool ThreadedKFVio::addImage(const okvis::Time& stamp,
     return cameraMeasurementsReceived_[cameraIndex]->PushBlockingIfFull(frame, 1);
     // return true;
   } else {
-    if (cameraMeasurementsReceived_[cameraIndex]->PushNonBlockingDroppingIfFull(frame, max_camera_input_queue_size)) {
+    const bool droppedOldest =
+        cameraMeasurementsReceived_[cameraIndex]->PushNonBlockingDroppingIfFull(frame, max_camera_input_queue_size);
+    if (droppedOldest) {
       DLOG(WARNING) << "oldest in the queue frame dropped";
       return false;
     }
@@ -360,7 +369,8 @@ bool ThreadedKFVio::addImuMeasurement(const okvis::Time& stamp,
     imuMeasurementsReceived_.PushBlockingIfFull(imu_measurement, 1);
     return true;
   } else {
-    imuMeasurementsReceived_.PushNonBlockingDroppingIfFull(imu_measurement, maxImuInputQueueSize_);
+    const bool droppedOldest =
+        imuMeasurementsReceived_.PushNonBlockingDroppingIfFull(imu_measurement, maxImuInputQueueSize_);
     return imuMeasurementsReceived_.Size() == 1;
   }
 }
@@ -421,10 +431,33 @@ void ThreadedKFVio::setBlocking(bool blocking) {
   }
 }
 
+bool ThreadedKFVio::waitForFeatureState(const okvis::Time& requiredTimestamp) {
+  if (requiredTimestamp.isZero()) return !shutdownRequested_.load();
+
+  std::unique_lock<std::mutex> lock(lastState_mutex_);
+  featureStateNotification_.wait(lock, [this, &requiredTimestamp]() {
+    return shutdownRequested_.load() || featureStateReadyThrough_ >= requiredTimestamp;
+  });
+  return !shutdownRequested_.load();
+}
+
+void ThreadedKFVio::markFeatureStateReady(const okvis::Time& timestamp) {
+  {
+    std::lock_guard<std::mutex> lock(lastState_mutex_);
+    if (featureStateReadyThrough_ < timestamp) featureStateReadyThrough_ = timestamp;
+  }
+  featureStateNotification_.notify_all();
+}
+
 // Loop to process frames from camera with index cameraIndex
 void ThreadedKFVio::frameConsumerLoop(size_t cameraIndex) {
   std::shared_ptr<okvis::CameraMeasurement> frame;
   std::shared_ptr<okvis::MultiFrame> multiFrame;
+  okvis::Time previousFeatureTimestamp(0, 0);
+  okvis::startup_camera_imu::AdmissionGate startupAdmissionGate(
+      parameters_.sensors_information.cameraRate, temporal_imu_data_overlap);
+  bool startupWarmupReady = false;
+  bool startupInitializationComplete = false;
   TimerSwitchable beforeDetectTimer("1.1 frameLoopBeforeDetect" + std::to_string(cameraIndex), true);
   TimerSwitchable waitForFrameSynchronizerMutexTimer(
       "1.1.1 waitForFrameSynchronizerMutex" + std::to_string(cameraIndex), true);
@@ -443,7 +476,26 @@ void ThreadedKFVio::frameConsumerLoop(size_t cameraIndex) {
     if (cameraMeasurementsReceived_[cameraIndex]->PopBlocking(&frame) == false) {
       return;
     }
+    if (!waitForFeatureState(previousFeatureTimestamp)) return;
     beforeDetectTimer.start();
+
+    // The first replayed camera callback can arrive before the IMU callback
+    // stream has established a usable history.  Hold the consumer at a
+    // timestamp-derived boundary so the frames used for initialization and
+    // the lower IMU-window boundary do not depend on callback scheduling.
+    if (!startupInitializationComplete) {
+      if (!startupAdmissionGate.initialized()) {
+        startupAdmissionGate.initialize(frame->timeStamp);
+      }
+      if (!startupWarmupReady) {
+        startupWarmupReady = imuFrameSynchronizer_.waitForUpToDateImuData(startupAdmissionGate.imuReadyUntil());
+        if (!startupWarmupReady) {
+          beforeDetectTimer.stop();
+          return;
+        }
+      }
+    }
+
     {  // lock the frame synchronizer
       waitForFrameSynchronizerMutexTimer.start();
       std::lock_guard<std::mutex> lock(frameSynchronizer_mutex_);
@@ -551,22 +603,39 @@ void ThreadedKFVio::frameConsumerLoop(size_t cameraIndex) {
       }
     }
 
+    bool estimatorHasFrames = false;
+    {
+      std::lock_guard<std::mutex> lock(estimator_mutex_);
+      estimatorHasFrames = estimator_.numFrames() != 0;
+    }
+
     // -- get relevant imu messages for new state
     okvis::Time imuDataEndTime = multiFrame->timestamp() + temporal_imu_data_overlap;
     okvis::Time imuDataBeginTime = lastTimestamp - temporal_imu_data_overlap;
+    const bool useStartupInitializationWindow = !startupInitializationComplete && !estimatorHasFrames;
+    if (useStartupInitializationWindow) {
+      // The pre-fix lower bound was the zero last-state timestamp.  For the
+      // first estimator state use a timestamp window beginning at this
+      // candidate camera frame; this excludes the scheduling-dependent IMU
+      // prefix while retaining the real gravity initializer.
+      imuDataBeginTime = multiFrame->timestamp();
+      imuDataEndTime = multiFrame->timestamp() + temporal_imu_data_overlap;
+    }
 
     OKVIS_ASSERT_TRUE_DBG(
         Exception, imuDataBeginTime < imuDataEndTime, "imu data end time is smaller than begin time.");
 
     // wait until all relevant imu messages have arrived and check for termination request
-    if (imuFrameSynchronizer_.waitForUpToDateImuData(okvis::Time(imuDataEndTime)) == false) {
+    const bool imuReady = imuFrameSynchronizer_.waitForUpToDateImuData(okvis::Time(imuDataEndTime));
+    if (!imuReady) {
       return;
     }
-    OKVIS_ASSERT_TRUE_DBG(Exception,
-                          imuDataEndTime < imuMeasurements_.back().timeStamp,
-                          "Waiting for up to date imu data seems to have failed!");
-
-    okvis::ImuMeasurementDeque imuData = getImuMeasurments(imuDataBeginTime, imuDataEndTime);
+    // ImuError::propagation() integrates from lastTimestamp, not from the
+    // extra temporal-overlap prefix used for readiness.  Select the latest
+    // timestamp at or before that physical start so callback-dependent IMU
+    // history before the state cannot alter the propagation input.
+    okvis::Time imuSelectionBeginTime = estimatorHasFrames ? lastTimestamp : imuDataBeginTime;
+    okvis::ImuMeasurementDeque imuData = getImuMeasurments(imuSelectionBeginTime, imuDataEndTime);
 
     // if imu_data is empty, either end_time > begin_time or
     // no measurements in timeframe, should not happen, as we waited for measurements
@@ -582,7 +651,7 @@ void ThreadedKFVio::frameConsumerLoop(size_t cameraIndex) {
     }
 
     // get T_WC(camIndx) for detectAndDescribe()
-    if (estimator_.numFrames() == 0) {
+    if (!estimatorHasFrames) {
       // first frame ever
       bool success = okvis::Estimator::initPoseFromImu(imuData, T_WS);
       {
@@ -597,6 +666,7 @@ void ThreadedKFVio::frameConsumerLoop(size_t cameraIndex) {
         beforeDetectTimer.stop();
         continue;
       }
+      startupInitializationComplete = true;
     } else {
       // get old T_WS
       propagationTimer.start();
@@ -634,6 +704,7 @@ void ThreadedKFVio::frameConsumerLoop(size_t cameraIndex) {
         return;
       }
       waitForMatchingThreadTimer.stop();
+      previousFeatureTimestamp = multiFrame->timestamp();
     }
   }
 }
@@ -656,6 +727,13 @@ void ThreadedKFVio::matchingLoop() {
     // -- get relevant imu messages for new state
     okvis::Time imuDataEndTime = frame->timestamp() + temporal_imu_data_overlap;
     okvis::Time imuDataBeginTime = lastAddedStateTimestamp_ - temporal_imu_data_overlap;
+    const bool firstEstimatorState = imuDataBeginTime.isZero();
+    if (firstEstimatorState) {
+      // Keep Estimator::addStates() on the same timestamp-defined 22-sample
+      // initialization window used by frameConsumerLoop.  The zero value is
+      // only the pre-state sentinel, not a physical IMU propagation start.
+      imuDataBeginTime = frame->timestamp();
+    }
 
     OKVIS_ASSERT_TRUE_DBG(Exception,
                           imuDataBeginTime < imuDataEndTime,
@@ -666,13 +744,14 @@ void ThreadedKFVio::matchingLoop() {
 
     // wait until all relevant imu messages have arrived and check for termination request
     if (imuFrameSynchronizer_.waitForUpToDateImuData(okvis::Time(imuDataEndTime)) == false) return;
-    OKVIS_ASSERT_TRUE_DBG(Exception,
-                          imuDataEndTime < imuMeasurements_.back().timeStamp,
-                          "Waiting for up to date imu data seems to have failed!");
-
     // TODO(Sharmin): check if needed to wait until all relevant sonar messages
 
-    okvis::ImuMeasurementDeque imuData = getImuMeasurments(imuDataBeginTime, imuDataEndTime);
+    // For the first matching state imuDataBeginTime was changed above to the
+    // candidate frame timestamp.  Once an estimator state exists,
+    // addStates()/ImuError::propagation() starts at lastAddedStateTimestamp_,
+    // so the overlap prefix must not determine the selected predecessor.
+    okvis::Time imuSelectionBeginTime = firstEstimatorState ? imuDataBeginTime : lastAddedStateTimestamp_;
+    okvis::ImuMeasurementDeque imuData = getImuMeasurments(imuSelectionBeginTime, imuDataEndTime);
 
     prepareToAddStateTimer.stop();
     // if imu_data is empty, either end_time > begin_time or
@@ -753,6 +832,7 @@ void ThreadedKFVio::matchingLoop() {
       } else {
         LOG(ERROR) << "Failed to add state! will drop multiframe.";
         addStateTimer.stop();
+        markFeatureStateReady(frame->timestamp());
         continue;
       }
 
@@ -786,6 +866,7 @@ void ThreadedKFVio::imuConsumerLoop() {
     processImuTimer.start();
     okvis::Time start;
     const okvis::Time* end;  // do not need to copy end timestamp
+    okvis::ImuMeasurementDeque imuMeasurementsSnapshot;
     {
       std::lock_guard<std::mutex> imuLock(imuMeasurements_mutex_);
       if (!imuMeasurements_.empty() && !(imuMeasurements_.back().timeStamp < data.timeStamp)) {
@@ -809,6 +890,7 @@ void ThreadedKFVio::imuConsumerLoop() {
         end = &data.timeStamp;
       }
       imuMeasurements_.push_back(data);
+      imuMeasurementsSnapshot = imuMeasurements_;
     }  // unlock _imuMeasurements_mutex
 
     // notify other threads that imu data with timeStamp is here.
@@ -818,7 +900,7 @@ void ThreadedKFVio::imuConsumerLoop() {
       Eigen::Matrix<double, 15, 15> covariance;
       Eigen::Matrix<double, 15, 15> jacobian;
 
-      frontend_.propagation(imuMeasurements_,
+      frontend_.propagation(imuMeasurementsSnapshot,
                             imu_params_,
                             T_WS_propagated_,
                             speedAndBiases_propagated_,
@@ -830,7 +912,8 @@ void ThreadedKFVio::imuConsumerLoop() {
       result.stamp = *end;
       result.T_WS = T_WS_propagated_;
       result.speedAndBiases = speedAndBiases_propagated_;
-      result.omega_S = imuMeasurements_.back().measurement.gyroscopes - speedAndBiases_propagated_.segment<3>(3);
+      result.omega_S =
+          imuMeasurementsSnapshot.back().measurement.gyroscopes - speedAndBiases_propagated_.segment<3>(3);
       for (size_t i = 0; i < parameters_.nCameraSystem.numCameras(); ++i) {
         result.vector_of_T_SCi.push_back(okvis::kinematics::Transformation(*parameters_.nCameraSystem.T_SC(i)));
       }
@@ -966,33 +1049,16 @@ void ThreadedKFVio::display() {
 // Get a subset of the recorded IMU measurements.
 okvis::ImuMeasurementDeque ThreadedKFVio::getImuMeasurments(okvis::Time& imuDataBeginTime,
                                                             okvis::Time& imuDataEndTime) {
-  // sanity checks:
-  // if end time is smaller than begin time, return empty queue.
-  // if begin time is larger than newest imu time, return empty queue.
-  if (imuDataEndTime < imuDataBeginTime || imuDataBeginTime > imuMeasurements_.back().timeStamp)
-    return okvis::ImuMeasurementDeque();
-
   std::lock_guard<std::mutex> lock(imuMeasurements_mutex_);
-  // get iterator to imu data before previous frame
-  okvis::ImuMeasurementDeque::iterator first_imu_package = imuMeasurements_.begin();
-  okvis::ImuMeasurementDeque::iterator last_imu_package = imuMeasurements_.end();
-  // TODO go backwards through queue. Is probably faster.
-  for (auto iter = imuMeasurements_.begin(); iter != imuMeasurements_.end(); ++iter) {
-    // move first_imu_package iterator back until iter->timeStamp is higher than requested begintime
-    if (iter->timeStamp <= imuDataBeginTime) first_imu_package = iter;
-
-    // set last_imu_package iterator as soon as we hit first timeStamp higher than requested endtime & break
-    if (iter->timeStamp >= imuDataEndTime) {
-      last_imu_package = iter;
-      // since we want to include this last imu measurement in returned Deque we
-      // increase last_imu_package iterator once.
-      ++last_imu_package;
-      break;
-    }
+  // Keep the producer, marginalization cleanup, and this snapshot on one
+  // synchronization path.  In particular, do not inspect back() before the
+  // lock: the camera and matching consumers can run while the IMU consumer
+  // appends or marginalization erases measurements.
+  if (imuMeasurements_.empty() || imuDataEndTime < imuDataBeginTime ||
+      imuDataBeginTime > imuMeasurements_.back().timeStamp) {
+    return okvis::ImuMeasurementDeque();
   }
-
-  // create copy of imu buffer
-  return okvis::ImuMeasurementDeque(first_imu_package, last_imu_package);
+  return okvis::startup_camera_imu::selectWindow(imuMeasurements_, imuDataBeginTime, imuDataEndTime);
 }
 
 // @Sharmin
@@ -1061,17 +1127,11 @@ okvis::SonarMeasurementDeque ThreadedKFVio::getSonarMeasurements(okvis::Time& so
 // Remove IMU measurements from the internal buffer.
 int ThreadedKFVio::deleteImuMeasurements(const okvis::Time& eraseUntil) {
   std::lock_guard<std::mutex> lock(imuMeasurements_mutex_);
+  if (imuMeasurements_.empty()) return 0;
   if (imuMeasurements_.front().timeStamp > eraseUntil) return 0;
 
-  okvis::ImuMeasurementDeque::iterator eraseEnd;
-  int removed = 0;
-  for (auto it = imuMeasurements_.begin(); it != imuMeasurements_.end(); ++it) {
-    eraseEnd = it;
-    if (it->timeStamp >= eraseUntil) break;
-    ++removed;
-  }
-
-  imuMeasurements_.erase(imuMeasurements_.begin(), eraseEnd);
+  const int removed = static_cast<int>(okvis::startup_camera_imu::eraseBeforeKeepingPredecessor(
+      imuMeasurements_, eraseUntil));
 
   return removed;
 }
@@ -1136,6 +1196,9 @@ void ThreadedKFVio::optimizationLoop() {
         estimator_.get_T_WS(frame_pairs->id(), lastOptimized_T_WS_);
         estimator_.getSpeedAndBias(frame_pairs->id(), 0, lastOptimizedSpeedAndBiases_);
         lastOptimizedStateTimestamp_ = frame_pairs->timestamp();
+        if (featureStateReadyThrough_ < frame_pairs->timestamp()) {
+          featureStateReadyThrough_ = frame_pairs->timestamp();
+        }
 
         // if we publish the state after each IMU propagation we do not need to publish it here.
         if (!parameters_.publishing.publishImuPropagatedState) {
@@ -1296,6 +1359,7 @@ void ThreadedKFVio::optimizationLoop() {
       optimizationDone_ = true;
     }  // unlock mutex
     optimizationNotification_.notify_all();
+    featureStateNotification_.notify_all();
 
     if (!parameters_.publishing.publishImuPropagatedState) {
       // adding further elements to result that do not access estimator.

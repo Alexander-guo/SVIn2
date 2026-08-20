@@ -182,6 +182,13 @@ class Frame {
   /// \return whether or not the operation was successful.
   inline bool resetDescriptors(const cv::Mat& descriptors);
 
+  /// \brief Canonicalize the keypoint/descriptor handoff order.
+  ///
+  /// Rows are ordered only by immutable keypoint bit patterns and descriptor
+  /// bytes.  Equal records are byte-identical, so their relative order cannot
+  /// affect the handoff.  Associated landmark IDs are moved with each row.
+  inline void canonicalizeFeatureOrder();
+
   /// \brief Get the number of keypoints.
   /// \return The number of keypoints.
   inline size_t numKeypoints() const;

@@ -50,6 +50,7 @@
 #include <okvis/Measurements.hpp>
 #include <okvis/MultiFrame.hpp>
 #include <okvis/Parameters.hpp>
+#include <okvis/StartupCameraImuAdmission.hpp>
 #include <okvis/VioVisualizer.hpp>
 #include <okvis/assert_macros.hpp>
 #include <okvis/cameras/NCameraSystem.hpp>
@@ -253,6 +254,10 @@ class ThreadedKFVio : public VioInterface {
  private:
   /// \brief Loop to process frames from camera with index cameraIndex
   void frameConsumerLoop(size_t cameraIndex);
+  /// \brief Wait until the state handoff for the preceding image is complete.
+  bool waitForFeatureState(const okvis::Time& requiredTimestamp);
+  /// \brief Release a waiting feature consumer after optimization or a dropped state.
+  void markFeatureStateReady(const okvis::Time& timestamp);
   /// \brief Loop that matches frames with existing frames.
   void matchingLoop();
   /// \brief Loop to process IMU measurements.
@@ -433,6 +438,9 @@ class ThreadedKFVio : public VioInterface {
   /// Boolean flag for whether optimization is done for the last state that has been added to the estimator.
   std::atomic_bool optimizationDone_;
   std::mutex lastState_mutex_;  ///< Lock when accessing any of the 'lastOptimized*' variables.
+  std::condition_variable featureStateNotification_;
+  okvis::Time featureStateReadyThrough_;  ///< Last image timestamp whose state handoff is complete.
+  std::atomic_bool shutdownRequested_;
 
   /// @}
   /// @name Consumer threads

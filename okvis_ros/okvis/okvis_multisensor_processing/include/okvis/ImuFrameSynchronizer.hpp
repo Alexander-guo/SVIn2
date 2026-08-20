@@ -79,8 +79,8 @@ class ImuFrameSynchronizer {
   void shutdown();
 
  private:
-  okvis::Time newestImuDataStamp_;            ///< Newest IMU data timestamp.
-  okvis::Time imuDataNeededUntil_;            ///< A thread is waiting for IMU data newer or equal to this timestamp.
+  okvis::Time newestImuDataStamp_;             ///< Newest IMU data timestamp.
+  okvis::Time imuDataNeededUntil_;             ///< Retained for source compatibility with the original protocol.
   std::condition_variable gotNeededImuData_;  ///< Condition variable for waiting and notyfing.
   std::mutex mutex_;                          ///< Mutex.
   std::atomic_bool shutdown_;                 ///< True if shutdown() was called.

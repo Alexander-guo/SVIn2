@@ -38,6 +38,10 @@
  * @author Andreas Forster
  */
 
+#include <algorithm>
+#include <array>
+#include <cstdint>
+#include <cstring>
 #include <memory>
 #include <vector>
 
@@ -47,6 +51,26 @@ using namespace cv;                     // NOLINT
 
 /// \brief okvis Main namespace of this package.
 namespace okvis {
+
+namespace {
+
+uint32_t frameFloatBits(float value) {
+  uint32_t bits = 0;
+  std::memcpy(&bits, &value, sizeof(bits));
+  return bits;
+}
+
+std::array<uint32_t, 7> frameKeypointOrderKey(const cv::KeyPoint& keypoint) {
+  return {frameFloatBits(keypoint.pt.x),
+          frameFloatBits(keypoint.pt.y),
+          frameFloatBits(keypoint.size),
+          frameFloatBits(keypoint.response),
+          static_cast<uint32_t>(static_cast<int32_t>(keypoint.octave)),
+          static_cast<uint32_t>(static_cast<int32_t>(keypoint.class_id)),
+          frameFloatBits(keypoint.angle)};
+}
+
+}  // namespace
 
 // a constructor that uses the specified geometry,
 /// detector and extractor
@@ -131,6 +155,7 @@ int Frame::describe(const Eigen::Vector3d& extractionDirection) {
   // extraction
   extractor_->compute(image_, keypoints_, descriptors_);
   landmarkIds_ = std::vector<uint64_t>(keypoints_.size(), 0);
+  canonicalizeFeatureOrder();
   return keypoints_.size();
 }
 // describe keypoints. This uses virtual function calls.
@@ -162,6 +187,7 @@ int Frame::describeAs(const Eigen::Vector3d& extractionDirection) {
 
   // extraction
   extractor_->compute(image_, keypoints_, descriptors_);
+  canonicalizeFeatureOrder();
   return keypoints_.size();
 }
 
@@ -291,6 +317,59 @@ inline bool Frame::resetKeypoints(const std::vector<cv::KeyPoint>& keypoints) {
 inline bool Frame::resetDescriptors(const cv::Mat& descriptors) {
   descriptors_ = descriptors;
   return true;
+}
+
+void Frame::canonicalizeFeatureOrder() {
+  if (keypoints_.size() < 2) return;
+
+  const bool descriptorsAligned =
+      descriptors_.rows == static_cast<int>(keypoints_.size()) && descriptors_.cols > 0;
+  if (descriptors_.rows > 0 && !descriptorsAligned) return;
+
+  std::vector<size_t> order(keypoints_.size());
+  for (size_t index = 0; index < order.size(); ++index) order[index] = index;
+
+  std::sort(order.begin(), order.end(), [this, descriptorsAligned](size_t lhs, size_t rhs) {
+    const std::array<uint32_t, 7> lhsKey = frameKeypointOrderKey(keypoints_[lhs]);
+    const std::array<uint32_t, 7> rhsKey = frameKeypointOrderKey(keypoints_[rhs]);
+    if (lhsKey != rhsKey) {
+      return std::lexicographical_compare(lhsKey.begin(), lhsKey.end(), rhsKey.begin(), rhsKey.end());
+    }
+    if (!descriptorsAligned) return false;
+
+    const unsigned char* lhsDescriptor = descriptors_.ptr<unsigned char>(static_cast<int>(lhs));
+    const unsigned char* rhsDescriptor = descriptors_.ptr<unsigned char>(static_cast<int>(rhs));
+    const size_t rowBytes = static_cast<size_t>(descriptors_.cols) * descriptors_.elemSize();
+    return std::lexicographical_compare(lhsDescriptor,
+                                        lhsDescriptor + rowBytes,
+                                        rhsDescriptor,
+                                        rhsDescriptor + rowBytes);
+  });
+
+  std::vector<cv::KeyPoint> sortedKeypoints;
+  sortedKeypoints.reserve(keypoints_.size());
+  std::vector<uint64_t> sortedLandmarkIds;
+  if (landmarkIds_.size() == keypoints_.size()) sortedLandmarkIds.reserve(landmarkIds_.size());
+
+  cv::Mat sortedDescriptors;
+  if (descriptorsAligned) {
+    sortedDescriptors.create(descriptors_.rows, descriptors_.cols, descriptors_.type());
+  }
+
+  for (size_t sortedIndex = 0; sortedIndex < order.size(); ++sortedIndex) {
+    const size_t originalIndex = order[sortedIndex];
+    sortedKeypoints.push_back(keypoints_[originalIndex]);
+    if (!sortedLandmarkIds.empty() || landmarkIds_.size() == keypoints_.size()) {
+      sortedLandmarkIds.push_back(landmarkIds_[originalIndex]);
+    }
+    if (descriptorsAligned) {
+      descriptors_.row(static_cast<int>(originalIndex)).copyTo(sortedDescriptors.row(static_cast<int>(sortedIndex)));
+    }
+  }
+
+  keypoints_.swap(sortedKeypoints);
+  if (landmarkIds_.size() == keypoints_.size()) landmarkIds_.swap(sortedLandmarkIds);
+  if (descriptorsAligned) descriptors_ = sortedDescriptors;
 }
 
 size_t Frame::numKeypoints() const { return keypoints_.size(); }

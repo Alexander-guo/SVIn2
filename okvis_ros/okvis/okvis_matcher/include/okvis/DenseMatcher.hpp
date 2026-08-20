@@ -102,8 +102,21 @@ class DenseMatcher {
     /// \brief Constructor.
     Pairing(int ia, distance_t d) : indexA(ia), distance(d) {}
 
-    /// \brief Compares distances
-    bool operator<(const Pairing& rhs) const { return distance < rhs.distance; }
+    /// \brief Compares by distance and then by the stable keypoint index.
+    ///
+    /// The index is the B-side keypoint while ordering a source A keypoint's
+    /// candidate list. During arbitration it is the A-side keypoint stored as
+    /// the current owner of a target B keypoint. Using the same total ordering
+    /// in both places makes equal finite descriptor distances deterministic.
+    bool operator<(const Pairing& rhs) const {
+      if (distance < rhs.distance) {
+        return true;
+      }
+      if (rhs.distance < distance) {
+        return false;
+      }
+      return indexA < rhs.indexA;
+    }
 
     int indexA;           ///< Index of paired keypoint.
     distance_t distance;  ///< Distance to paired keypoint.

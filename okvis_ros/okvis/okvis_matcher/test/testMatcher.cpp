@@ -1,7 +1,9 @@
 #include <gtest/gtest.h>
 #include <math.h>
 
+#include <chrono>
 #include <okvis/DenseMatcher.hpp>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -52,6 +54,52 @@ class TestMatchingAlgorithm : public okvis::MatchingAlgorithm {
   std::vector<double> listA;
   std::vector<double> listB;
   std::vector<std::pair<int, int> > matches;
+};
+
+class EqualDistanceConflictMatchingAlgorithm : public okvis::MatchingAlgorithm {
+ public:
+  EqualDistanceConflictMatchingAlgorithm()
+      : distances_(4, std::vector<float>(4, 5.0f)), delayedSource_(0) {
+    distances_[0][0] = 1.0f;
+    distances_[1][0] = 1.0f;
+    distances_[1][1] = 2.0f;
+    distances_[2][2] = 1.0f;
+    distances_[3][3] = 1.0f;
+  }
+
+  void doSetup() override { matches.clear(); }
+
+  size_t sizeA() const override { return distances_.size(); }
+  size_t sizeB() const override { return distances_.front().size(); }
+
+  float distanceThreshold() const override { return 4.0f; }
+  float distanceRatioThreshold() const override { return 3.0f; }
+
+  float distance(size_t indexA, size_t indexB) const override {
+    // Alternate which of the conflicting workers is delayed so both lock
+    // acquisition orders are exercised by the repeated test.
+    if (indexA == delayedSource_) {
+      std::this_thread::sleep_for(std::chrono::microseconds(50));
+    }
+    return distances_[indexA][indexB];
+  }
+
+  void reserveMatches(size_t numMatches) override {
+    matches.clear();
+    matches.reserve(numMatches);
+  }
+
+  void setBestMatch(size_t indexA, size_t indexB, double /* distance */) override {
+    matches.push_back(std::make_pair(static_cast<int>(indexA), static_cast<int>(indexB)));
+  }
+
+  void setDelayedSource(size_t indexA) { delayedSource_ = indexA; }
+
+  std::vector<std::pair<int, int> > matches;
+
+ private:
+  std::vector<std::vector<float> > distances_;
+  size_t delayedSource_;
 };
 
 TEST(DenseMatcherTestSuite, denseMatcherTest) {
@@ -133,5 +181,33 @@ TEST(DenseMatcherTestSuite, denseMatcherDistanceRatioTest) {
       default:
         FAIL() << "Unexpected match " << tma.matches[i].first << " --> " << tma.matches[i].second;
     }
+  }
+}
+
+TEST(DenseMatcherTestSuite, denseMatcherEqualDistanceConflictIsDeterministic) {
+  EqualDistanceConflictMatchingAlgorithm tma;
+  okvis::DenseMatcher matcher(4);
+  const std::vector<std::pair<int, int> > expected{{0, 0}, {1, 1}, {2, 2}, {3, 3}};
+
+  for (size_t repeat = 0; repeat < 128; ++repeat) {
+    tma.setDelayedSource(repeat % 2);
+    matcher.match(tma);
+
+    ASSERT_EQ(expected.size(), tma.matches.size()) << "repeat " << repeat;
+    EXPECT_EQ(expected, tma.matches) << "repeat " << repeat;
+  }
+}
+
+TEST(DenseMatcherTestSuite, denseMatcherEqualDistanceConflictPreservesRatioThreshold) {
+  EqualDistanceConflictMatchingAlgorithm tma;
+  okvis::DenseMatcher matcher(4, 4, true);
+  const std::vector<std::pair<int, int> > expected{{0, 0}, {2, 2}, {3, 3}};
+
+  for (size_t repeat = 0; repeat < 32; ++repeat) {
+    tma.setDelayedSource((repeat + 1) % 2);
+    matcher.match(tma);
+
+    ASSERT_EQ(expected.size(), tma.matches.size()) << "repeat " << repeat;
+    EXPECT_EQ(expected, tma.matches) << "repeat " << repeat;
   }
 }

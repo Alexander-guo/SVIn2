@@ -66,6 +66,7 @@ void DenseMatcher::assignbest(int indexToAssignFromListA,
   for (int index = startidx; index < numBest_ && aiBest[index].indexA != -1; ++index) {
     // fetch index to pair with myidx
     const int pairIndexFromListB = aiBest[index].indexA;
+    const pairing_t candidate(indexToAssignFromListA, aiBest[index].distance);
     // synchronize this
     mutexes[pairIndexFromListB].lock();
     if (vPairsWithScore[pairIndexFromListB].indexA == -1) {
@@ -78,12 +79,12 @@ void DenseMatcher::assignbest(int indexToAssignFromListA,
       return;
     } else {
       // already paired, so check the score of that pairing
-      if (aiBest[index].distance < vPairsWithScore[pairIndexFromListB].distance) {
+      if (candidate < vPairsWithScore[pairIndexFromListB]) {
         // My distance is better!
         // save vals of old pairing
         const int oldPairIndexFromListA = vPairsWithScore[pairIndexFromListB].indexA;
         // pair with me
-        vPairsWithScore[pairIndexFromListB] = pairing_t(indexToAssignFromListA, aiBest[index].distance);
+        vPairsWithScore[pairIndexFromListB] = candidate;
         mutexes[pairIndexFromListB].unlock();
         // now reassign the old paring recursivly
         // note: skip element at position zero since we just assigned a match with better score,

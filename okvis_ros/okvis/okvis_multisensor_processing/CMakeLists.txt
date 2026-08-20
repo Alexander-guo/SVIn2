@@ -32,6 +32,7 @@ add_library(${PROJECT_NAME}
   include/okvis/DepthFrameSynchronizer.hpp  # @Sharmin
   include/okvis/RelocFrameSynchronizer.hpp  # @Sharmin
   include/okvis/FrameSynchronizer.hpp
+  include/okvis/StartupCameraImuAdmission.hpp
   include/okvis/VioVisualizer.hpp
   include/okvis/threadsafe/ThreadsafeQueue.hpp
   ../cmake/okvisConfig.hpp.in
@@ -63,6 +64,30 @@ install(DIRECTORY include/ DESTINATION ${INSTALL_INCLUDE_DIR} COMPONENT dev FILE
 
 # testing
 if(BUILD_TESTS)
+  enable_testing()
+
+  add_executable(${PROJECT_NAME}_deterministic_feature_handoff_test
+    ../okvis_frontend/test/TestDeterministicFeatureHandoff.cpp
+  )
+  target_link_libraries(${PROJECT_NAME}_deterministic_feature_handoff_test
+    gtest
+    gtest_main
+    ${PROJECT_NAME}
+    ${OpenCV_LIBRARIES}
+    pthread)
+  add_test(test_deterministic_feature_handoff ${PROJECT_NAME}_deterministic_feature_handoff_test)
+
+  add_executable(${PROJECT_NAME}_startup_camera_imu_admission_test
+    test/StartupCameraImuAdmission_test.cpp
+  )
+  target_link_libraries(${PROJECT_NAME}_startup_camera_imu_admission_test
+    gtest
+    gtest_main
+    ${PROJECT_NAME}
+    ${OpenCV_LIBRARIES}
+    pthread)
+  add_test(test_startup_camera_imu_admission ${PROJECT_NAME}_startup_camera_imu_admission_test)
+
   if(APPLE)
     add_definitions(-DGTEST_HAS_TR1_TUPLE=1)
   else()
@@ -73,12 +98,12 @@ if(BUILD_TESTS)
   find_library(GMOCK_MAIN_LIBRARY NAMES gmock_main)
 
   if(GMOCK_LIBRARY AND GMOCK_MAIN_LIBRARY)
-    enable_testing()
     set(PROJECT_TEST_NAME ${PROJECT_NAME}_test)
     add_executable(${PROJECT_TEST_NAME}
       test/test_main.cpp
       test/FrameSynchronizer_test.cpp
       test/ImuFrameSynchronizer_test.cpp
+      test/StartupCameraImuAdmission_test.cpp
       test/test_main.cpp
       test/testThreading.cpp
       test/testDataFlow.cpp
@@ -98,4 +123,3 @@ if(BUILD_TESTS)
     message(STATUS "Skipping ${PROJECT_NAME} tests because gmock was not found.")
   endif()
 endif()
-

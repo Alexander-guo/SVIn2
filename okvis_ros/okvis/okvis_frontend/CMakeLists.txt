@@ -58,6 +58,7 @@ if(BUILD_TESTS)
   add_executable(${PROJECT_TEST_NAME}
     test/runTests.cpp
     test/TestDeferredBearingTracks.cpp
+    test/TestDeterministicFeatureProduction.cpp
     test/TestStereoTriangulation.cpp
   )
   target_link_libraries(${PROJECT_TEST_NAME}
