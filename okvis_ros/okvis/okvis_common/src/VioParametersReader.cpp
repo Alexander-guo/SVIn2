@@ -282,8 +282,10 @@ void VioParametersReader::readConfigFile(const std::string& filename) {
     std::string histogram_method = static_cast<std::string>(file["histogramMethod"]);
     if (histogram_method == "NONE" || histogram_method == "none") {
       vioParameters_.histogramParams.histogramMethod = HistogramMethod::NONE;
+      cout << "Histogram method is set to NONE" << std::endl;
     } else if (histogram_method == "HISTOGRAM" || histogram_method == "histogram") {
       vioParameters_.histogramParams.histogramMethod = HistogramMethod::HISTOGRAM;
+      std::cout << "Histogram method is set to HISTOGRAM" << std::endl;
     } else if (histogram_method == "CLAHE" || histogram_method == "clahe") {
       vioParameters_.histogramParams.histogramMethod = HistogramMethod::CLAHE;
       vioParameters_.histogramParams.claheClipLimit = 5.0;

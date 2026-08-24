@@ -219,6 +219,21 @@ class Estimator : public VioBackendInterface {
    */
   void optimize(size_t numIter, size_t numThreads = 1, bool verbose = false);
 
+  /// Lightweight copy of the most recent Ceres solve result for diagnostics.
+  struct OptimizationDiagnostics {
+    int iterations = 0;
+    int successfulSteps = 0;
+    int unsuccessfulSteps = 0;
+    int terminationType = -1;
+    double initialCost = 0.0;
+    double finalCost = 0.0;
+    double totalTimeSeconds = 0.0;
+    bool solutionUsable = false;
+  };
+
+  /// Return diagnostics for the most recently completed optimize() call.
+  OptimizationDiagnostics optimizationDiagnostics() const;
+
   /**
    * @brief Set a time limit for the optimization process.
    * @param[in] timeLimit Time limit in seconds. If timeLimit < 0 the time limit is removed.

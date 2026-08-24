@@ -42,6 +42,7 @@
 
 #include "okvis/VioVisualizer.hpp"
 
+#include <glog/logging.h>
 #include <okvis/FrameTypedefs.hpp>
 #include <okvis/cameras/NCameraSystem.hpp>
 #include <okvis/kinematics/Transformation.hpp>
@@ -49,6 +50,7 @@
 // cameras and distortions
 #include <algorithm>
 #include <cmath>
+#include <iomanip>
 #include <memory>
 #include <okvis/cameras/DoubleSphereCamera.hpp>
 #include <okvis/cameras/EquidistantDistortion.hpp>
@@ -56,6 +58,7 @@
 #include <okvis/cameras/PinholeCamera.hpp>
 #include <okvis/cameras/RadialTangentialDistortion.hpp>
 #include <okvis/cameras/RadialTangentialDistortion8.hpp>
+#include <sstream>
 #include <vector>
 
 /// \brief okvis Main namespace of this package.
@@ -69,7 +72,10 @@ VioVisualizer::VioVisualizer(okvis::VioParameters& parameters) : parameters_(par
 
 VioVisualizer::~VioVisualizer() {}
 
-void VioVisualizer::init(okvis::VioParameters& parameters) { parameters_ = parameters; }
+void VioVisualizer::init(okvis::VioParameters& parameters) {
+  parameters_ = parameters;
+  diagnosticFrameCounters_.assign(parameters_.nCameraSystem.numCameras(), 0);
+}
 
 cv::Mat VioVisualizer::drawMatches(VisualizationData::Ptr& data, size_t image_number) {
   std::shared_ptr<okvis::MultiFrame> keyframe = data->keyFrames;
@@ -95,11 +101,97 @@ cv::Mat VioVisualizer::drawMatches(VisualizationData::Ptr& data, size_t image_nu
     cv::resize(colorImage, displayImage, cv::Size(width, kPanelHeight), 0.0, 0.0, cv::INTER_AREA);
   };
 
+  cv::Mat grayImage;
+  if (currentImage.channels() == 1) {
+    grayImage = currentImage;
+  } else {
+    cv::cvtColor(currentImage, grayImage, cv::COLOR_BGR2GRAY);
+  }
+  cv::Scalar intensityMean;
+  cv::Scalar intensityStdDev;
+  cv::meanStdDev(grayImage, intensityMean, intensityStdDev);
+  const double pixelCount = static_cast<double>(grayImage.total());
+  const double darkFraction = pixelCount > 0.0 ? cv::countNonZero(grayImage < 20) / pixelCount : 0.0;
+  const double saturatedFraction = pixelCount > 0.0 ? cv::countNonZero(grayImage > 245) / pixelCount : 0.0;
+  cv::Mat laplacian;
+  cv::Laplacian(grayImage, laplacian, CV_64F);
+  cv::Scalar laplacianMean;
+  cv::Scalar laplacianStdDev;
+  cv::meanStdDev(laplacian, laplacianMean, laplacianStdDev);
+  const double laplacianVariance = laplacianStdDev[0] * laplacianStdDev[0];
+
+  const auto annotateDiagnostics = [&](cv::Mat& image) {
+    if (image.empty()) return;
+    const VisualizationData::DriftDiagnostics& drift = data->drift;
+    std::vector<std::string> lines;
+    std::ostringstream line;
+    line << std::fixed << std::setprecision(2) << "t " << drift.timestamp << "  rel " << drift.relativeTimestamp
+         << "  frame " << drift.frameId << (drift.isKeyframe ? "  KF" : "") << "  cam " << image_number;
+    lines.push_back(line.str());
+    line.str("");
+    line.clear();
+    const size_t cameraFinite = image_number < drift.cameraFinite.size() ? drift.cameraFinite[image_number] : 0;
+    const size_t cameraPending = image_number < drift.cameraPending.size() ? drift.cameraPending[image_number] : 0;
+    const size_t cameraUnassociated =
+        image_number < drift.cameraUnassociated.size() ? drift.cameraUnassociated[image_number] : 0;
+    const size_t cameraCoverage = image_number < drift.cameraFiniteCoverageCells.size()
+                                      ? drift.cameraFiniteCoverageCells[image_number]
+                                      : 0;
+    line << "cam support finite/pending/unassoc " << cameraFinite << "/" << cameraPending << "/"
+         << cameraUnassociated << "  coverage " << cameraCoverage << "/16";
+    lines.push_back(line.str());
+    line.str("");
+    line.clear();
+    line << std::fixed << std::setprecision(3) << "|v| " << drift.velocity.norm() << "  opt dp "
+         << drift.optimizationTranslation << " m  dR " << drift.optimizationRotationDegrees << " deg";
+    lines.push_back(line.str());
+    line.str("");
+    line.clear();
+    line << std::fixed << std::setprecision(2) << "est reproj chi2 p50/p90 " << drift.reprojectionPostP50 << "/"
+         << drift.reprojectionPostP90 << "  >4 " << 100.0 * drift.reprojectionPostFractionOver4 << "%";
+    lines.push_back(line.str());
+    line.str("");
+    line.clear();
+    line << std::fixed << std::setprecision(1) << "post image mean/std " << intensityMean[0] << "/"
+         << intensityStdDev[0] << "  dark " << 100.0 * darkFraction << "%  blur " << laplacianVariance;
+    lines.push_back(line.str());
+
+    constexpr int kLineHeight = 18;
+    const int boxHeight = static_cast<int>(lines.size()) * kLineHeight + 8;
+    cv::rectangle(image, cv::Rect(0, 0, image.cols, std::min(boxHeight, image.rows)), cv::Scalar(0, 0, 0), -1);
+    for (size_t index = 0; index < lines.size(); ++index) {
+      cv::putText(image,
+                  lines[index],
+                  cv::Point(6, 17 + static_cast<int>(index) * kLineHeight),
+                  cv::FONT_HERSHEY_SIMPLEX,
+                  0.43,
+                  cv::Scalar(255, 255, 255),
+                  1,
+                  cv::LINE_AA);
+    }
+  };
+
+  const double configuredCameraRate = parameters_.sensors_information.cameraRate;
+  const size_t baselinePeriod = std::isfinite(configuredCameraRate) && configuredCameraRate >= 1.0
+                                    ? static_cast<size_t>(std::llround(configuredCameraRate))
+                                    : 1;
+  if (image_number < diagnosticFrameCounters_.size() &&
+      ++diagnosticFrameCounters_[image_number] % baselinePeriod == 0) {
+    LOG(INFO) << std::setprecision(17) << "[IMAGE_QUALITY_DIAGNOSTIC]"
+              << " timestamp=" << data->drift.timestamp
+              << " relative_timestamp=" << data->drift.relativeTimestamp << " frame=" << data->drift.frameId
+              << " camera=" << image_number << " post_mean=" << intensityMean[0]
+              << " post_stddev=" << intensityStdDev[0] << " post_dark_fraction=" << darkFraction
+              << " post_saturated_fraction=" << saturatedFraction
+              << " post_laplacian_variance=" << laplacianVariance;
+  }
+
   const int currentWidth = panelWidth(currentImage);
   const double currentScale = static_cast<double>(kPanelHeight) / currentImage.rows;
   if (keyframe == nullptr) {
     cv::Mat currentDisplay;
     toDisplayImage(currentImage, currentDisplay, currentWidth);
+    annotateDiagnostics(currentDisplay);
     return currentDisplay;
   }
 
@@ -231,6 +323,7 @@ cv::Mat VioVisualizer::drawMatches(VisualizationData::Ptr& data, size_t image_nu
                cv::LINE_AA);
     }
   }
+  annotateDiagnostics(outimg);
   return outimg;
 }
 

@@ -65,6 +65,100 @@ class VioVisualizer {
     std::shared_ptr<okvis::MultiFrame> currentFrames;  ///< Current multiframe.
     std::shared_ptr<okvis::MultiFrame> keyFrames;      ///< Current keyframe.
     okvis::kinematics::Transformation T_WS_keyFrame;   ///< Pose of the current keyframe
+
+    struct DriftDiagnostics {
+      uint64_t frameId = 0;
+      double timestamp = 0.0;
+      double relativeTimestamp = 0.0;
+      bool isKeyframe = false;
+      size_t activeFrames = 0;
+      size_t activeKeyframes = 0;
+      size_t activeLandmarks = 0;
+      size_t activeInitializedLandmarks = 0;
+      size_t preMarginalizationFrames = 0;
+      size_t preMarginalizationLandmarks = 0;
+      size_t marginalizedLandmarks = 0;
+      size_t keypoints = 0;
+      size_t unassociated = 0;
+      size_t pending = 0;
+      size_t finite = 0;
+      size_t uninitialized = 0;
+      size_t invalidInitialized = 0;
+      std::vector<size_t> cameraKeypoints;
+      std::vector<size_t> cameraUnassociated;
+      std::vector<size_t> cameraPending;
+      std::vector<size_t> cameraFinite;
+      std::vector<size_t> cameraUninitialized;
+      std::vector<size_t> cameraInvalidInitialized;
+      std::vector<size_t> cameraFiniteCoverageCells;
+      Eigen::Vector3d position = Eigen::Vector3d::Zero();
+      Eigen::Quaterniond orientation = Eigen::Quaterniond::Identity();
+      Eigen::Vector3d velocity = Eigen::Vector3d::Zero();
+      Eigen::Vector3d gyroBias = Eigen::Vector3d::Zero();
+      Eigen::Vector3d accelBias = Eigen::Vector3d::Zero();
+      double deltaTime = 0.0;
+      double frameTranslation = 0.0;
+      double frameRotationDegrees = 0.0;
+      double optimizationTranslation = 0.0;
+      double optimizationRotationDegrees = 0.0;
+      double optimizationVelocity = 0.0;
+      double optimizationGyroBias = 0.0;
+      double optimizationAccelBias = 0.0;
+      size_t finiteCoverageCells = 0;
+      size_t finiteCoverageCellsPossible = 0;
+      double reprojectionPreP50 = 0.0;
+      double reprojectionPreP90 = 0.0;
+      double reprojectionPostP50 = 0.0;
+      double reprojectionPostP90 = 0.0;
+      double reprojectionPostMax = 0.0;
+      double reprojectionPostFractionOver4 = 0.0;
+      double reprojectionPostFractionOver9 = 0.0;
+      size_t reprojectionPreCount = 0;
+      size_t reprojectionPostCount = 0;
+      size_t reprojectionPreInvalid = 0;
+      size_t reprojectionPostInvalid = 0;
+      // Geometry diagnostics are read-only summaries.  Current-camera
+      // depth/range and translation-information fields use the unique finite
+      // landmark IDs visible in the current frame; active-window observation
+      // counts/spans and multiview parallax then use historical observations
+      // only for that currently visible ID set.  Per-camera values are
+      // comma-separated in the log; an empty sample is serialized as "nan" and
+      // has an explicit zero count.
+      std::vector<size_t> geometryCurrentCameraRangeValidCount;
+      std::vector<double> geometryCurrentCameraRangeP10;
+      std::vector<double> geometryCurrentCameraRangeP50;
+      std::vector<double> geometryCurrentCameraRangeP90;
+      std::vector<size_t> geometryCurrentCameraDepthValidCount;
+      std::vector<double> geometryCurrentCameraDepthP10;
+      std::vector<double> geometryCurrentCameraDepthP50;
+      std::vector<double> geometryCurrentCameraDepthP90;
+      size_t geometryActiveObservationCountValid = 0;
+      double geometryActiveObservationCountP10 = 0.0;
+      double geometryActiveObservationCountP50 = 0.0;
+      double geometryActiveObservationCountP90 = 0.0;
+      size_t geometryActiveFrameSpanValid = 0;
+      double geometryActiveFrameSpanP10 = 0.0;
+      double geometryActiveFrameSpanP50 = 0.0;
+      double geometryActiveFrameSpanP90 = 0.0;
+      size_t geometryParallaxValid = 0;
+      double geometryParallaxP10 = 0.0;
+      double geometryParallaxP50 = 0.0;
+      double geometryParallaxP90 = 0.0;
+      size_t geometryTranslationInfoObservationCount = 0;
+      double geometryTranslationInfoEigenMin = 0.0;
+      double geometryTranslationInfoEigenMedian = 0.0;
+      double geometryTranslationInfoEigenMax = 0.0;
+      size_t geometryTranslationInfoEffectiveRank = 0;
+      double geometryTranslationInfoConditionNumber = 0.0;
+      int optimizationIterations = 0;
+      int optimizationSuccessfulSteps = 0;
+      int optimizationUnsuccessfulSteps = 0;
+      int optimizationTerminationType = -1;
+      double optimizationInitialCost = 0.0;
+      double optimizationFinalCost = 0.0;
+      double optimizationTimeSeconds = 0.0;
+      bool optimizationUsable = false;
+    } drift;
   };
 
   OKVIS_DEFINE_EXCEPTION(Exception, std::runtime_error)
@@ -107,6 +201,8 @@ class VioVisualizer {
 
   /// Parameters and settings.
   okvis::VioParameters parameters_;
+  /// Per-camera counters used to bound structured image-quality logging.
+  std::vector<size_t> diagnosticFrameCounters_;
 };
 
 } /* namespace okvis */

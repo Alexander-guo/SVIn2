@@ -147,6 +147,8 @@ class Subscriber {
   rclcpp::Subscription<sensor_msgs::msg::PointCloud>::SharedPtr
       subReloPoints_;        ///< The Relocalization Points Subscriber from pose_graph @Sharmin
   cv::Ptr<cv::CLAHE> clahe;  /// Sharmin
+  std::mutex imageDiagnosticsMutex_;
+  std::vector<int64_t> lastImageDiagnosticSecond_;
   /// @}
 
   okvis::VioInterface* vioInterface_;   ///< The VioInterface. (E.g. ThreadedKFVio)

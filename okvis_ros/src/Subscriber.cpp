@@ -40,7 +40,12 @@
 
 #include <glog/logging.h>
 
+#include <cstdlib>
+#include <cstring>
+#include <cmath>
 #include <functional>
+#include <iomanip>
+#include <limits>
 #include <memory>
 #include <okvis/Subscriber.hpp>
 #include <vector>
@@ -49,6 +54,13 @@
 
 /// \brief okvis Main namespace of this package.
 namespace okvis {
+
+namespace {
+bool driftDiagnosticsOptIn() {
+  const char* value = std::getenv("SVIN2_ENABLE_DRIFT_DIAGNOSTICS");
+  return value != nullptr && std::strcmp(value, "1") == 0;
+}
+}  // namespace
 
 Subscriber::~Subscriber() { imgTransport_.release(); }
 
@@ -60,6 +72,8 @@ Subscriber::Subscriber(std::shared_ptr<rclcpp::Node> node,
   param_reader.getParameters(vioParameters_);
 
   imageSubscribers_.resize(vioParameters_.nCameraSystem.numCameras());
+  lastImageDiagnosticSecond_.assign(vioParameters_.nCameraSystem.numCameras(),
+                                    std::numeric_limits<int64_t>::min());
 
   imgTransport_ = std::make_unique<image_transport::ImageTransport>(node);
 
@@ -171,6 +185,89 @@ void Subscriber::imageCallback(const sensor_msgs::msg::Image::ConstSharedPtr msg
   // adapt timestamp
   okvis::Time t(msg->header.stamp.sec, msg->header.stamp.nanosec);
   t -= okvis::Duration(vioParameters_.sensors_information.imageDelay);
+
+  bool emitImageDiagnostic = false;
+  const bool driftDiagnosticsEnabled = vioParameters_.visualization.displayImages ||
+                                       vioParameters_.visualization.publishDebugImages || driftDiagnosticsOptIn();
+  if (driftDiagnosticsEnabled) {
+    const int64_t diagnosticSecond = static_cast<int64_t>(std::floor(t.toSec()));
+    std::lock_guard<std::mutex> lock(imageDiagnosticsMutex_);
+    if (cameraIndex < lastImageDiagnosticSecond_.size() &&
+        lastImageDiagnosticSecond_[cameraIndex] != diagnosticSecond) {
+      lastImageDiagnosticSecond_[cameraIndex] = diagnosticSecond;
+      emitImageDiagnostic = true;
+    }
+  }
+  if (emitImageDiagnostic) {
+    const auto imageStatistics = [](const cv::Mat& image,
+                                    double& mean,
+                                    double& standardDeviation,
+                                    double& darkFraction,
+                                    double& saturatedFraction) {
+      cv::Mat gray;
+      if (image.channels() == 1) {
+        gray = image;
+      } else {
+        cv::cvtColor(image, gray, cv::COLOR_BGR2GRAY);
+      }
+      cv::Scalar imageMean;
+      cv::Scalar imageStdDev;
+      cv::meanStdDev(gray, imageMean, imageStdDev);
+      const double pixelCount = static_cast<double>(gray.total());
+      mean = imageMean[0];
+      standardDeviation = imageStdDev[0];
+      darkFraction = pixelCount > 0.0 ? cv::countNonZero(gray < 20) / pixelCount : 0.0;
+      saturatedFraction = pixelCount > 0.0 ? cv::countNonZero(gray > 245) / pixelCount : 0.0;
+    };
+    double preMean = 0.0;
+    double preStdDev = 0.0;
+    double preDarkFraction = 0.0;
+    double preSaturatedFraction = 0.0;
+    double postMean = 0.0;
+    double postStdDev = 0.0;
+    double postDarkFraction = 0.0;
+    double postSaturatedFraction = 0.0;
+    imageStatistics(filtered, preMean, preStdDev, preDarkFraction, preSaturatedFraction);
+    imageStatistics(histogram_equalized_image,
+                    postMean,
+                    postStdDev,
+                    postDarkFraction,
+                    postSaturatedFraction);
+    LOG(INFO) << std::setprecision(17) << "[IMAGE_PREPROCESS_DIAGNOSTIC]"
+              << " timestamp=" << t.toSec() << " camera=" << cameraIndex
+              << " histogram_method=" << static_cast<int>(vioParameters_.histogramParams.histogramMethod)
+              << " pre_mean=" << preMean << " pre_stddev=" << preStdDev
+              << " pre_dark_fraction=" << preDarkFraction
+              << " pre_saturated_fraction=" << preSaturatedFraction
+              << " post_mean=" << postMean << " post_stddev=" << postStdDev
+              << " post_dark_fraction=" << postDarkFraction
+              << " post_saturated_fraction=" << postSaturatedFraction;
+
+    // The opt-in path emits image quality without entering the visualization
+    // queue.  This keeps displayImages/publishDebugImages behavior unchanged
+    // and does not create, render, or publish a debug image.
+    if (driftDiagnosticsOptIn() && !vioParameters_.visualization.displayImages &&
+        !vioParameters_.visualization.publishDebugImages) {
+      cv::Mat gray;
+      if (histogram_equalized_image.channels() == 1) {
+        gray = histogram_equalized_image;
+      } else {
+        cv::cvtColor(histogram_equalized_image, gray, cv::COLOR_BGR2GRAY);
+      }
+      cv::Mat laplacian;
+      cv::Laplacian(gray, laplacian, CV_64F);
+      cv::Scalar laplacianMean;
+      cv::Scalar laplacianStdDev;
+      cv::meanStdDev(laplacian, laplacianMean, laplacianStdDev);
+      const double laplacianVariance = laplacianStdDev[0] * laplacianStdDev[0];
+      LOG(INFO) << std::setprecision(17) << "[IMAGE_QUALITY_DIAGNOSTIC]"
+                << " timestamp=" << t.toSec() << " relative_timestamp=nan"
+                << " frame=-1 camera=" << cameraIndex << " post_mean=" << postMean
+                << " post_stddev=" << postStdDev << " post_dark_fraction=" << postDarkFraction
+                << " post_saturated_fraction=" << postSaturatedFraction
+                << " post_laplacian_variance=" << laplacianVariance;
+    }
+  }
 
   // Update last image time for watchdog (steady clock)
   last_image_tp_ = std::chrono::steady_clock::now();

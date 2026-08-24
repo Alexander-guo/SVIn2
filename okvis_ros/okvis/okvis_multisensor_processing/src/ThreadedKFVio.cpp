@@ -40,10 +40,16 @@
 
 #include <glog/logging.h>
 
+#include <Eigen/Eigenvalues>
 #include <algorithm>
+#include <cstdlib>
+#include <cstring>
+#include <iomanip>
 #include <list>
+#include <limits>
 #include <map>
 #include <memory>
+#include <set>
 #include <sstream>
 #include <okvis/ThreadedKFVio.hpp>
 #include <okvis/assert_macros.hpp>
@@ -87,6 +93,54 @@ uint64_t frameCnt = 0;  // Sharmin
 static const int max_camera_input_queue_size = 10;
 static const okvis::Duration temporal_imu_data_overlap(
     0.02);  // overlap of imu data before and after two consecutive frames [seconds]
+
+namespace {
+bool driftDiagnosticsOptIn() {
+  const char* value = std::getenv("SVIN2_ENABLE_DRIFT_DIAGNOSTICS");
+  return value != nullptr && std::strcmp(value, "1") == 0;
+}
+
+double quaternionDistanceDegrees(const Eigen::Quaterniond& lhs, const Eigen::Quaterniond& rhs) {
+  const double cosineHalfAngle = std::clamp(std::abs(lhs.dot(rhs)), 0.0, 1.0);
+  return 2.0 * std::acos(cosineHalfAngle) * 180.0 / M_PI;
+}
+
+double percentile(std::vector<double> values, double fraction) {
+  if (values.empty()) return 0.0;
+  std::sort(values.begin(), values.end());
+  const size_t index = static_cast<size_t>(
+      std::round(std::clamp(fraction, 0.0, 1.0) * static_cast<double>(values.size() - 1)));
+  return values[index];
+}
+
+std::string commaSeparated(const std::vector<size_t>& values) {
+  std::ostringstream stream;
+  for (size_t index = 0; index < values.size(); ++index) {
+    if (index > 0) stream << ',';
+    stream << values[index];
+  }
+  return stream.str();
+}
+
+std::string commaSeparatedDoubles(const std::vector<double>& values) {
+  std::ostringstream stream;
+  stream << std::setprecision(17);
+  for (size_t index = 0; index < values.size(); ++index) {
+    if (index > 0) stream << ',';
+    if (std::isfinite(values[index])) stream << values[index];
+    else stream << "nan";
+  }
+  return stream.str();
+}
+
+double percentileOrNaN(std::vector<double> values, double fraction) {
+  if (values.empty()) return std::numeric_limits<double>::quiet_NaN();
+  std::sort(values.begin(), values.end());
+  const size_t index = static_cast<size_t>(
+      std::round(std::clamp(fraction, 0.0, 1.0) * static_cast<double>(values.size() - 1)));
+  return values[index];
+}
+}  // namespace
 
 #ifdef USE_MOCK
 // Constructor for gmock.
@@ -715,6 +769,7 @@ void ThreadedKFVio::matchingLoop() {
   TimerSwitchable waitForOptimizationTimer("2.2 waitForOptimization", true);
   TimerSwitchable addStateTimer("2.3 addState", true);
   TimerSwitchable matchingTimer("2.4 matching", true);
+  size_t imuWindowDiagnosticCounter = 0;
 
   for (;;) {
     // get new frame
@@ -757,6 +812,37 @@ void ThreadedKFVio::matchingLoop() {
     // if imu_data is empty, either end_time > begin_time or
     // no measurements in timeframe, should not happen, as we waited for measurements
     if (imuData.size() == 0) continue;
+
+    if (parameters_.visualization.displayImages || debugImgCallback_ || driftDiagnosticsOptIn()) {
+      double maximumGap = 0.0;
+      for (size_t index = 1; index < imuData.size(); ++index) {
+        maximumGap = std::max(maximumGap, (imuData[index].timeStamp - imuData[index - 1].timeStamp).toSec());
+      }
+      const double predecessorMargin = (imuSelectionBeginTime - imuData.front().timeStamp).toSec();
+      const double successorMargin = (imuData.back().timeStamp - imuDataEndTime).toSec();
+      const double configuredImuRate = parameters_.imu.rate;
+      const double gapThreshold = std::isfinite(configuredImuRate) && configuredImuRate > 0.0
+                                      ? 2.5 / configuredImuRate
+                                      : 0.02;
+      const double configuredCameraRate = parameters_.sensors_information.cameraRate;
+      const size_t baselinePeriod = std::isfinite(configuredCameraRate) && configuredCameraRate >= 1.0
+                                        ? static_cast<size_t>(std::llround(configuredCameraRate))
+                                        : 1;
+      ++imuWindowDiagnosticCounter;
+      if (maximumGap > gapThreshold || predecessorMargin < 0.0 || successorMargin < 0.0 ||
+          imuWindowDiagnosticCounter % baselinePeriod == 0) {
+        LOG(INFO) << std::setprecision(17) << "[IMU_WINDOW_DIAGNOSTIC]"
+                  << " timestamp=" << frame->timestamp().toSec() << " frame=" << frame->id()
+                  << " samples=" << imuData.size() << " selection_begin=" << imuSelectionBeginTime.toSec()
+                  << " selection_end=" << imuDataEndTime.toSec()
+                  << " first_sample=" << imuData.front().timeStamp.toSec()
+                  << " last_sample=" << imuData.back().timeStamp.toSec()
+                  << " predecessor_margin=" << predecessorMargin
+                  << " successor_margin=" << successorMargin << " max_gap=" << maximumGap
+                  << " expected_period="
+                  << (std::isfinite(configuredImuRate) && configuredImuRate > 0.0 ? 1.0 / configuredImuRate : 0.0);
+      }
+    }
 
     // @Sharmin
     // Sonar Data
@@ -1141,15 +1227,72 @@ void ThreadedKFVio::optimizationLoop() {
   TimerSwitchable optimizationTimer("3.1 optimization", true);
   TimerSwitchable marginalizationTimer("3.2 marginalization", true);
   TimerSwitchable afterOptimizationTimer("3.3 afterOptimization", true);
+  okvis::Time driftDiagnosticEpoch(0, 0);
+  size_t driftDiagnosticFrameCounter = 0;
+  size_t previousFiniteSupport = 0;
+  size_t driftDiagnosticBurstRemaining = 0;
+  bool driftDiagnosticEventActive = false;
 
   for (;;) {
     std::shared_ptr<okvis::MultiFrame> frame_pairs;
     VioVisualizer::VisualizationData::Ptr visualizationDataPtr;
     okvis::Time deleteImuMeasurementsUntil(0, 0);
+    std::string driftDiagnosticLine;
+    bool driftDiagnosticShouldEmit = false;
     if (matchedFrames_.PopBlocking(&frame_pairs) == false) return;
     OptimizationResults result;
     {
       std::lock_guard<std::mutex> l(estimator_mutex_);
+      const bool driftDiagnosticsEnabled = parameters_.visualization.displayImages || debugImgCallback_ ||
+                                           driftDiagnosticsOptIn();
+      okvis::kinematics::Transformation preOptimizationT_WS;
+      okvis::SpeedAndBias preOptimizationSpeedAndBias = okvis::SpeedAndBias::Zero();
+      okvis::kinematics::Transformation previousOptimizedT_WS;
+      okvis::Time previousOptimizedTimestamp(0, 0);
+      bool havePreOptimizationState = false;
+      bool havePreviousOptimizedState = false;
+      std::vector<double> preOptimizationChi2;
+      size_t preOptimizationInvalidProjections = 0;
+      if (driftDiagnosticsEnabled) {
+        havePreOptimizationState = estimator_.get_T_WS(frame_pairs->id(), preOptimizationT_WS) &&
+                                   estimator_.getSpeedAndBias(
+                                       frame_pairs->id(), 0, preOptimizationSpeedAndBias);
+        std::lock_guard<std::mutex> stateLock(lastState_mutex_);
+        if (lastOptimizedStateTimestamp_ > okvis::Time(0, 0)) {
+          previousOptimizedT_WS = lastOptimized_T_WS_;
+          previousOptimizedTimestamp = lastOptimizedStateTimestamp_;
+          havePreviousOptimizedState = true;
+        }
+      }
+      if (havePreOptimizationState) {
+        for (size_t cameraIndex = 0; cameraIndex < frame_pairs->numFrames(); ++cameraIndex) {
+          for (size_t keypointIndex = 0; keypointIndex < frame_pairs->numKeypoints(cameraIndex); ++keypointIndex) {
+            const uint64_t landmarkId = frame_pairs->landmarkId(cameraIndex, keypointIndex);
+            if (landmarkId == 0 || !estimator_.isLandmarkAdded(landmarkId) ||
+                !estimator_.isLandmarkInitialized(landmarkId)) {
+              continue;
+            }
+            okvis::MapPoint landmark;
+            estimator_.getLandmark(landmarkId, landmark);
+            Eigen::Vector2d measurement;
+            double keypointSize = 0.0;
+            frame_pairs->getKeypoint(cameraIndex, keypointIndex, measurement);
+            frame_pairs->getKeypointSize(cameraIndex, keypointIndex, keypointSize);
+            const okvis::kinematics::Transformation T_CW =
+                frame_pairs->T_SC(cameraIndex)->inverse() * preOptimizationT_WS.inverse();
+            Eigen::Vector2d prediction;
+            const cameras::CameraBase::ProjectionStatus status =
+                frame_pairs->geometry(cameraIndex)->projectHomogeneous(T_CW * landmark.point, &prediction);
+            if (status != cameras::CameraBase::ProjectionStatus::Successful || !prediction.allFinite() ||
+                !measurement.allFinite() || !std::isfinite(keypointSize) || keypointSize <= 0.0) {
+              ++preOptimizationInvalidProjections;
+              continue;
+            }
+            preOptimizationChi2.push_back(
+                (prediction - measurement).squaredNorm() * 64.0 / (keypointSize * keypointSize));
+          }
+        }
+      }
       optimizationTimer.start();
       // if(frontend_.isInitialized()){
       //TODO(GUO): make this num of threads for optimization configurable
@@ -1172,6 +1315,9 @@ void ThreadedKFVio::optimizationLoop() {
       }*/
 
       optimizationTimer.stop();
+
+      const size_t preMarginalizationFrames = estimator_.numFrames();
+      const size_t preMarginalizationLandmarks = estimator_.numLandmarks();
 
       // get timestamp of last frame in IMU window. Need to do this before marginalization as it will be removed there
       // (if not keyframe)
@@ -1322,9 +1468,64 @@ void ThreadedKFVio::optimizationLoop() {
         //*********** End Added by Sharmin *******//
       }
 
-      if (parameters_.visualization.displayImages || debugImgCallback_) {
+      if (parameters_.visualization.displayImages || debugImgCallback_ || driftDiagnosticsOptIn()) {
         // fill in information that requires access to estimator.
         visualizationDataPtr = std::make_shared<VioVisualizer::VisualizationData>();
+        VioVisualizer::VisualizationData::DriftDiagnostics& drift = visualizationDataPtr->drift;
+        drift.frameId = frame_pairs->id();
+        drift.timestamp = frame_pairs->timestamp().toSec();
+        if (driftDiagnosticEpoch == okvis::Time(0, 0)) driftDiagnosticEpoch = frame_pairs->timestamp();
+        drift.relativeTimestamp = (frame_pairs->timestamp() - driftDiagnosticEpoch).toSec();
+        drift.isKeyframe = estimator_.isKeyframe(frame_pairs->id());
+        drift.activeFrames = estimator_.numFrames();
+        for (size_t age = 0; age < estimator_.numFrames(); ++age) {
+          if (estimator_.isKeyframe(estimator_.frameIdByAge(age))) ++drift.activeKeyframes;
+        }
+        drift.activeLandmarks = result.landmarksVector.size();
+        drift.preMarginalizationFrames = preMarginalizationFrames;
+        drift.preMarginalizationLandmarks = preMarginalizationLandmarks;
+        drift.marginalizedLandmarks = result.transferredLandmarks.size();
+        for (const okvis::MapPoint& mapPoint : result.landmarksVector) {
+          if (estimator_.isLandmarkInitialized(mapPoint.id)) ++drift.activeInitializedLandmarks;
+        }
+        drift.position = lastOptimized_T_WS_.r();
+        drift.orientation = lastOptimized_T_WS_.q();
+        drift.velocity = lastOptimizedSpeedAndBiases_.head<3>();
+        drift.gyroBias = lastOptimizedSpeedAndBiases_.segment<3>(3);
+        drift.accelBias = lastOptimizedSpeedAndBiases_.segment<3>(6);
+        if (havePreOptimizationState) {
+          drift.optimizationTranslation = (lastOptimized_T_WS_.r() - preOptimizationT_WS.r()).norm();
+          drift.optimizationRotationDegrees =
+              quaternionDistanceDegrees(lastOptimized_T_WS_.q(), preOptimizationT_WS.q());
+          drift.optimizationVelocity =
+              (lastOptimizedSpeedAndBiases_.head<3>() - preOptimizationSpeedAndBias.head<3>()).norm();
+          drift.optimizationGyroBias =
+              (lastOptimizedSpeedAndBiases_.segment<3>(3) - preOptimizationSpeedAndBias.segment<3>(3)).norm();
+          drift.optimizationAccelBias =
+              (lastOptimizedSpeedAndBiases_.segment<3>(6) - preOptimizationSpeedAndBias.segment<3>(6)).norm();
+        }
+        if (havePreviousOptimizedState) {
+          drift.deltaTime = (lastOptimizedStateTimestamp_ - previousOptimizedTimestamp).toSec();
+          drift.frameTranslation = (lastOptimized_T_WS_.r() - previousOptimizedT_WS.r()).norm();
+          drift.frameRotationDegrees =
+              quaternionDistanceDegrees(lastOptimized_T_WS_.q(), previousOptimizedT_WS.q());
+        }
+        const Estimator::OptimizationDiagnostics optimizer = estimator_.optimizationDiagnostics();
+        drift.optimizationIterations = optimizer.iterations;
+        drift.optimizationSuccessfulSteps = optimizer.successfulSteps;
+        drift.optimizationUnsuccessfulSteps = optimizer.unsuccessfulSteps;
+        drift.optimizationTerminationType = optimizer.terminationType;
+        drift.optimizationInitialCost = optimizer.initialCost;
+        drift.optimizationFinalCost = optimizer.finalCost;
+        drift.optimizationTimeSeconds = optimizer.totalTimeSeconds;
+        drift.optimizationUsable = optimizer.solutionUsable;
+        drift.cameraKeypoints.assign(frame_pairs->numFrames(), 0);
+        drift.cameraUnassociated.assign(frame_pairs->numFrames(), 0);
+        drift.cameraPending.assign(frame_pairs->numFrames(), 0);
+        drift.cameraFinite.assign(frame_pairs->numFrames(), 0);
+        drift.cameraUninitialized.assign(frame_pairs->numFrames(), 0);
+        drift.cameraInvalidInitialized.assign(frame_pairs->numFrames(), 0);
+        drift.cameraFiniteCoverageCells.assign(frame_pairs->numFrames(), 0);
         visualizationDataPtr->observations.resize(frame_pairs->numKeypoints());
         okvis::MapPoint landmark;
         auto it = visualizationDataPtr->observations.begin();
@@ -1338,26 +1539,451 @@ void ThreadedKFVio::optimizationLoop() {
             it->cameraIdx = camIndex;
             it->frameId = frame_pairs->id();
             it->landmarkId = frame_pairs->landmarkId(camIndex, k);
+            ++drift.keypoints;
+            ++drift.cameraKeypoints[camIndex];
+            if (it->landmarkId == 0) {
+              ++drift.unassociated;
+              ++drift.cameraUnassociated[camIndex];
+            }
             if (estimator_.isLandmarkAdded(it->landmarkId)) {
               estimator_.getLandmark(it->landmarkId, landmark);
               it->landmark_W = landmark.point;
-              if (estimator_.isLandmarkInitialized(it->landmarkId))
+              if (estimator_.isLandmarkInitialized(it->landmarkId)) {
                 it->isInitialized = true;
-              else
+                if (landmark.point.allFinite() && std::abs(landmark.point[3]) > 1.0e-8) {
+                  ++drift.finite;
+                  ++drift.cameraFinite[camIndex];
+                } else {
+                  ++drift.invalidInitialized;
+                  ++drift.cameraInvalidInitialized[camIndex];
+                }
+              } else {
                 it->isInitialized = false;
+                ++drift.uninitialized;
+                ++drift.cameraUninitialized[camIndex];
+              }
             } else {
               it->landmark_W =
                   Eigen::Vector4d(0, 0, 0, 0);  // set to infinity to tell visualizer that landmark is not added
+              if (it->landmarkId != 0) {
+                ++drift.pending;
+                ++drift.cameraPending[camIndex];
+              }
             }
             ++it;
           }
         }
         visualizationDataPtr->keyFrames = estimator_.multiFrame(estimator_.currentKeyframeId());
         estimator_.get_T_WS(estimator_.currentKeyframeId(), visualizationDataPtr->T_WS_keyFrame);
+
+        // Geometry-only diagnostics.  The lambda is invoked only when the
+        // existing drift-record cadence selects this frame below.  It reads
+        // copies already made for this frame and never alters landmarks,
+        // observations, thresholds, factors, or solver state.
+        auto populateGeometryDiagnostics = [&]() {
+        const double nan = std::numeric_limits<double>::quiet_NaN();
+        const size_t cameraCount = frame_pairs->numFrames();
+        drift.geometryCurrentCameraRangeValidCount.assign(cameraCount, 0);
+        drift.geometryCurrentCameraRangeP10.assign(cameraCount, nan);
+        drift.geometryCurrentCameraRangeP50.assign(cameraCount, nan);
+        drift.geometryCurrentCameraRangeP90.assign(cameraCount, nan);
+        drift.geometryCurrentCameraDepthValidCount.assign(cameraCount, 0);
+        drift.geometryCurrentCameraDepthP10.assign(cameraCount, nan);
+        drift.geometryCurrentCameraDepthP50.assign(cameraCount, nan);
+        drift.geometryCurrentCameraDepthP90.assign(cameraCount, nan);
+        drift.geometryActiveObservationCountValid = 0;
+        drift.geometryActiveObservationCountP10 = nan;
+        drift.geometryActiveObservationCountP50 = nan;
+        drift.geometryActiveObservationCountP90 = nan;
+        drift.geometryActiveFrameSpanValid = 0;
+        drift.geometryActiveFrameSpanP10 = nan;
+        drift.geometryActiveFrameSpanP50 = nan;
+        drift.geometryActiveFrameSpanP90 = nan;
+        drift.geometryParallaxValid = 0;
+        drift.geometryParallaxP10 = nan;
+        drift.geometryParallaxP50 = nan;
+        drift.geometryParallaxP90 = nan;
+        drift.geometryTranslationInfoObservationCount = 0;
+        drift.geometryTranslationInfoEigenMin = nan;
+        drift.geometryTranslationInfoEigenMedian = nan;
+        drift.geometryTranslationInfoEigenMax = nan;
+        drift.geometryTranslationInfoEffectiveRank = 0;
+        drift.geometryTranslationInfoConditionNumber = nan;
+
+        // Build an explicit active-frame index.  Observations referring to a
+        // marginalized/unavailable frame or keypoint are excluded rather than
+        // treated as zero-good samples.  The map is bounded by the estimator
+        // window and avoids repeated multiFrame lookups per observation.
+        struct ActiveFrameState {
+          double timestamp = 0.0;
+          okvis::kinematics::Transformation T_WS;
+          okvis::MultiFramePtr frame;
+        };
+        std::map<uint64_t, ActiveFrameState> activeFrameStates;
+        for (size_t age = 0; age < estimator_.numFrames(); ++age) {
+          const uint64_t activeFrameId = estimator_.frameIdByAge(age);
+          if (activeFrameId == 0) continue;
+          okvis::MultiFramePtr activeFrame = estimator_.multiFrame(activeFrameId);
+          okvis::kinematics::Transformation activeT_WS;
+          if (!activeFrame || !estimator_.get_T_WS(activeFrameId, activeT_WS)) continue;
+          activeFrameStates.emplace(activeFrameId,
+                                    ActiveFrameState{activeFrame->timestamp().toSec(), activeT_WS, activeFrame});
+        }
+
+        // result.landmarksVector is a unique active-map copy.  Keep one entry
+        // per ID so repeated current-frame observations cannot duplicate a
+        // landmark in the per-camera depth/range summaries.
+        std::map<uint64_t, const okvis::MapPoint*> finiteLandmarks;
+        for (const okvis::MapPoint& mapPoint : result.landmarksVector) {
+          if (mapPoint.id == 0 || !mapPoint.point.allFinite() || std::abs(mapPoint.point[3]) <= 1.0e-8 ||
+              !estimator_.isLandmarkInitialized(mapPoint.id)) {
+            continue;
+          }
+          const Eigen::Vector3d point_W = mapPoint.point.head<3>() / mapPoint.point[3];
+          if (point_W.allFinite()) finiteLandmarks.emplace(mapPoint.id, &mapPoint);
+        }
+
+        // The nested sets are the unique current-frame camera+landmark keys;
+        // repeated keypoints for one landmark in one camera contribute once.
+        std::vector<std::set<uint64_t>> currentCameraFiniteLandmarks(cameraCount);
+        std::set<uint64_t> currentVisibleFiniteLandmarks;
+        for (const okvis::Observation& observation : visualizationDataPtr->observations) {
+          if (!observation.isInitialized || observation.cameraIdx >= cameraCount || observation.landmarkId == 0 ||
+              finiteLandmarks.find(observation.landmarkId) == finiteLandmarks.end()) {
+            continue;
+          }
+          currentCameraFiniteLandmarks[observation.cameraIdx].insert(observation.landmarkId);
+          currentVisibleFiniteLandmarks.insert(observation.landmarkId);
+        }
+
+        // Current-camera depth/range uses the optimized current pose and only
+        // finite initialized landmarks observed in that camera.  Depth is the
+        // positive camera-frame z coordinate; range is the Euclidean camera
+        // frame norm.  Quantiles are per camera and retain nan/count when empty.
+        Eigen::Matrix3d translationInfoSurrogate = Eigen::Matrix3d::Zero();
+        size_t translationInfoObservationCount = 0;
+        for (size_t cameraIndex = 0; cameraIndex < cameraCount; ++cameraIndex) {
+          std::vector<double> ranges;
+          std::vector<double> depths;
+          const okvis::kinematics::Transformation T_CW =
+              frame_pairs->T_SC(cameraIndex)->inverse() * lastOptimized_T_WS_.inverse();
+          for (const uint64_t landmarkId : currentCameraFiniteLandmarks[cameraIndex]) {
+            const auto landmarkIt = finiteLandmarks.find(landmarkId);
+            if (landmarkIt == finiteLandmarks.end()) continue;
+            const Eigen::Vector4d point_C_h = T_CW * landmarkIt->second->point;
+            if (!point_C_h.allFinite() || std::abs(point_C_h[3]) <= 1.0e-8) continue;
+            const Eigen::Vector3d point_C = point_C_h.head<3>() / point_C_h[3];
+            const double range = point_C.norm();
+            if (std::isfinite(range) && range > 1.0e-9) ranges.push_back(range);
+            if (std::isfinite(point_C.z()) && point_C.z() > 1.0e-9) depths.push_back(point_C.z());
+            if (std::isfinite(range) && range > 1.0e-9) {
+              // This is the current-frame translation-information surrogate.
+              // Each unique current camera+landmark observation contributes in
+              // the common world frame, using the current optimized pose/ray.
+              const okvis::kinematics::Transformation T_WC =
+                  lastOptimized_T_WS_ * (*parameters_.nCameraSystem.T_SC(cameraIndex));
+              const Eigen::Vector3d unitBearing_C = point_C / range;
+              const Eigen::Vector3d unitBearing_W = T_WC * unitBearing_C;
+              if (unitBearing_W.allFinite()) {
+                translationInfoSurrogate +=
+                    (Eigen::Matrix3d::Identity() - unitBearing_W * unitBearing_W.transpose()) /
+                    (range * range);
+                ++translationInfoObservationCount;
+              }
+            }
+          }
+          drift.geometryCurrentCameraRangeValidCount[cameraIndex] = ranges.size();
+          drift.geometryCurrentCameraRangeP10[cameraIndex] = percentileOrNaN(ranges, 0.10);
+          drift.geometryCurrentCameraRangeP50[cameraIndex] = percentileOrNaN(ranges, 0.50);
+          drift.geometryCurrentCameraRangeP90[cameraIndex] = percentileOrNaN(ranges, 0.90);
+          drift.geometryCurrentCameraDepthValidCount[cameraIndex] = depths.size();
+          drift.geometryCurrentCameraDepthP10[cameraIndex] = percentileOrNaN(depths, 0.10);
+          drift.geometryCurrentCameraDepthP50[cameraIndex] = percentileOrNaN(depths, 0.50);
+          drift.geometryCurrentCameraDepthP90[cameraIndex] = percentileOrNaN(depths, 0.90);
+        }
+
+        std::vector<double> activeObservationCounts;
+        std::vector<double> activeFrameSpans;
+        std::vector<double> parallaxAnglesDegrees;
+        for (const uint64_t landmarkId : currentVisibleFiniteLandmarks) {
+          const auto landmarkIt = finiteLandmarks.find(landmarkId);
+          if (landmarkIt == finiteLandmarks.end()) continue;
+          const okvis::MapPoint& mapPoint = *landmarkIt->second;
+          const Eigen::Vector3d point_W = mapPoint.point.head<3>() / mapPoint.point[3];
+          std::vector<double> observationTimes;
+          std::vector<Eigen::Vector3d> observationCenters;
+          std::vector<Eigen::Vector3d> observationRays;
+          for (const auto& observationEntry : mapPoint.observations) {
+            const okvis::KeypointIdentifier& observation = observationEntry.first;
+            const auto frameIt = activeFrameStates.find(observation.frameId);
+            if (frameIt == activeFrameStates.end() || !frameIt->second.frame ||
+                observation.cameraIndex >= cameraCount ||
+                observation.keypointIndex >= frameIt->second.frame->numKeypoints(observation.cameraIndex)) {
+              continue;
+            }
+            const okvis::kinematics::Transformation T_WC =
+                frameIt->second.T_WS * (*parameters_.nCameraSystem.T_SC(observation.cameraIndex));
+            const Eigen::Vector3d ray_W = point_W - T_WC.r();
+            const double range = ray_W.norm();
+            if (!std::isfinite(range) || range <= 1.0e-9 || !ray_W.allFinite()) continue;
+            const Eigen::Vector3d unitBearing_W = ray_W / range;
+            if (!unitBearing_W.allFinite()) continue;
+            observationTimes.push_back(frameIt->second.timestamp);
+            observationCenters.push_back(T_WC.r());
+            observationRays.push_back(unitBearing_W);
+          }
+          if (observationTimes.empty()) continue;
+          activeObservationCounts.push_back(static_cast<double>(observationTimes.size()));
+          const auto timeBounds = std::minmax_element(observationTimes.begin(), observationTimes.end());
+          activeFrameSpans.push_back(*timeBounds.second - *timeBounds.first);
+          for (size_t first = 0; first < observationCenters.size(); ++first) {
+            for (size_t second = first + 1; second < observationCenters.size(); ++second) {
+              if ((observationCenters[first] - observationCenters[second]).norm() <= 1.0e-9) continue;
+              const double cosine = std::clamp(observationRays[first].dot(observationRays[second]), -1.0, 1.0);
+              parallaxAnglesDegrees.push_back(std::acos(cosine) * 180.0 / M_PI);
+            }
+          }
+        }
+        drift.geometryActiveObservationCountValid = activeObservationCounts.size();
+        drift.geometryActiveObservationCountP10 = percentileOrNaN(activeObservationCounts, 0.10);
+        drift.geometryActiveObservationCountP50 = percentileOrNaN(activeObservationCounts, 0.50);
+        drift.geometryActiveObservationCountP90 = percentileOrNaN(activeObservationCounts, 0.90);
+        drift.geometryActiveFrameSpanValid = activeFrameSpans.size();
+        drift.geometryActiveFrameSpanP10 = percentileOrNaN(activeFrameSpans, 0.10);
+        drift.geometryActiveFrameSpanP50 = percentileOrNaN(activeFrameSpans, 0.50);
+        drift.geometryActiveFrameSpanP90 = percentileOrNaN(activeFrameSpans, 0.90);
+        drift.geometryParallaxValid = parallaxAnglesDegrees.size();
+        drift.geometryParallaxP10 = percentileOrNaN(parallaxAnglesDegrees, 0.10);
+        drift.geometryParallaxP50 = percentileOrNaN(parallaxAnglesDegrees, 0.50);
+        drift.geometryParallaxP90 = percentileOrNaN(parallaxAnglesDegrees, 0.90);
+        drift.geometryTranslationInfoObservationCount = translationInfoObservationCount;
+        if (translationInfoObservationCount > 0) {
+          translationInfoSurrogate =
+              0.5 * (translationInfoSurrogate + translationInfoSurrogate.transpose());
+          const Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> eigenSolver(translationInfoSurrogate);
+          if (eigenSolver.info() == Eigen::Success && eigenSolver.eigenvalues().allFinite()) {
+            const Eigen::Vector3d eigenvalues = eigenSolver.eigenvalues();
+            drift.geometryTranslationInfoEigenMin = eigenvalues[0];
+            drift.geometryTranslationInfoEigenMedian = eigenvalues[1];
+            drift.geometryTranslationInfoEigenMax = eigenvalues[2];
+            // Effective rank uses a documented relative 1e-3 threshold on
+            // lambda_max; rank deficiency remains visible instead of becoming
+            // a misleading finite/zero-good scalar.
+            const double relativeRankThreshold = 1.0e-3 * eigenvalues[2];
+            drift.geometryTranslationInfoEffectiveRank = static_cast<size_t>(
+                (eigenvalues.array() > relativeRankThreshold).count());
+            if (eigenvalues[0] > 0.0) {
+              drift.geometryTranslationInfoConditionNumber = eigenvalues[2] / eigenvalues[0];
+            }
+          }
+        }
+        };
+
+        std::vector<bool> occupiedCells(parameters_.nCameraSystem.numCameras() * 16, false);
+        for (const okvis::Observation& observation : visualizationDataPtr->observations) {
+          if (!observation.isInitialized || observation.cameraIdx >= frame_pairs->numFrames()) continue;
+          const cv::Mat& image = frame_pairs->image(observation.cameraIdx);
+          if (image.empty() || !observation.keypointMeasurement.allFinite()) continue;
+          const int column = std::clamp(
+              static_cast<int>(4.0 * observation.keypointMeasurement[0] / image.cols), 0, 3);
+          const int row = std::clamp(
+              static_cast<int>(4.0 * observation.keypointMeasurement[1] / image.rows), 0, 3);
+          occupiedCells[observation.cameraIdx * 16 + static_cast<size_t>(row * 4 + column)] = true;
+        }
+        drift.finiteCoverageCells = static_cast<size_t>(std::count(occupiedCells.begin(), occupiedCells.end(), true));
+        drift.finiteCoverageCellsPossible = occupiedCells.size();
+        for (size_t cameraIndex = 0; cameraIndex < frame_pairs->numFrames(); ++cameraIndex) {
+          drift.cameraFiniteCoverageCells[cameraIndex] = static_cast<size_t>(
+              std::count(occupiedCells.begin() + cameraIndex * 16,
+                         occupiedCells.begin() + (cameraIndex + 1) * 16,
+                         true));
+        }
+
+        const auto reprojectionChi2 = [&](const okvis::kinematics::Transformation& T_WS,
+                                          std::vector<double>& values,
+                                          size_t& invalid) {
+          values.clear();
+          invalid = 0;
+          for (const okvis::Observation& observation : visualizationDataPtr->observations) {
+            if (!observation.isInitialized || observation.cameraIdx >= frame_pairs->numFrames()) continue;
+            const okvis::kinematics::Transformation T_CW =
+                frame_pairs->T_SC(observation.cameraIdx)->inverse() * T_WS.inverse();
+            const Eigen::Vector4d point_C = T_CW * observation.landmark_W;
+            Eigen::Vector2d prediction;
+            const cameras::CameraBase::ProjectionStatus status =
+                frame_pairs->geometry(observation.cameraIdx)->projectHomogeneous(point_C, &prediction);
+            if (status != cameras::CameraBase::ProjectionStatus::Successful || !prediction.allFinite() ||
+                !observation.keypointMeasurement.allFinite() || !std::isfinite(observation.keypointSize) ||
+                observation.keypointSize <= 0.0) {
+              ++invalid;
+              continue;
+            }
+            const double squaredError = (prediction - observation.keypointMeasurement).squaredNorm();
+            values.push_back(squaredError * 64.0 /
+                             (observation.keypointSize * observation.keypointSize));
+          }
+        };
+        std::vector<double> postChi2;
+        drift.reprojectionPreCount = preOptimizationChi2.size();
+        drift.reprojectionPreInvalid = preOptimizationInvalidProjections;
+        drift.reprojectionPreP50 = percentile(preOptimizationChi2, 0.50);
+        drift.reprojectionPreP90 = percentile(preOptimizationChi2, 0.90);
+        reprojectionChi2(lastOptimized_T_WS_, postChi2, drift.reprojectionPostInvalid);
+        drift.reprojectionPostCount = postChi2.size();
+        drift.reprojectionPostP50 = percentile(postChi2, 0.50);
+        drift.reprojectionPostP90 = percentile(postChi2, 0.90);
+        drift.reprojectionPostMax = percentile(postChi2, 1.0);
+        if (!postChi2.empty()) {
+          drift.reprojectionPostFractionOver4 =
+              static_cast<double>(std::count_if(postChi2.begin(), postChi2.end(),
+                                                [](double value) { return value > 4.0; })) /
+              postChi2.size();
+          drift.reprojectionPostFractionOver9 =
+              static_cast<double>(std::count_if(postChi2.begin(), postChi2.end(),
+                                                [](double value) { return value > 9.0; })) /
+              postChi2.size();
+        }
+
+        // Decide the exact existing baseline/burst emission cadence before
+        // running the expensive geometry summaries.  State updates remain
+        // single-shot here; the log itself is still formatted and emitted
+        // outside estimator_mutex_.
+        const double configuredCameraRate = parameters_.sensors_information.cameraRate;
+        const size_t baselinePeriod = std::isfinite(configuredCameraRate) && configuredCameraRate >= 1.0
+                                          ? static_cast<size_t>(std::llround(configuredCameraRate))
+                                          : 1;
+        const bool supportCollapsed = drift.finite < 30;
+        const bool supportDropped = previousFiniteSupport > 0 && drift.finite * 2 < previousFiniteSupport;
+        const bool estimatorConflict = drift.reprojectionPostP90 > 4.0 || drift.optimizationTranslation > 0.2 ||
+                                       !drift.optimizationUsable;
+        ++driftDiagnosticFrameCounter;
+        const bool eventActive = supportCollapsed || supportDropped || estimatorConflict;
+        if (eventActive && !driftDiagnosticEventActive) {
+          driftDiagnosticBurstRemaining = std::max<size_t>(1, 3 * baselinePeriod);
+        }
+        if (!eventActive) driftDiagnosticEventActive = false;
+        else driftDiagnosticEventActive = true;
+        const bool inBurst = driftDiagnosticBurstRemaining > 0;
+        if (inBurst) --driftDiagnosticBurstRemaining;
+        driftDiagnosticShouldEmit = inBurst || driftDiagnosticFrameCounter % baselinePeriod == 0;
+        previousFiniteSupport = drift.finite;
+        if (driftDiagnosticShouldEmit) populateGeometryDiagnostics();
+
+        std::ostringstream diagnostic;
+        diagnostic << std::setprecision(17) << "[ESTIMATOR_DRIFT_DIAGNOSTIC]"
+                   << " timestamp=" << drift.timestamp << " relative_timestamp=" << drift.relativeTimestamp
+                   << " frame=" << drift.frameId
+                   << " keyframe=" << drift.isKeyframe << " dt=" << drift.deltaTime
+                   << " position_x=" << drift.position.x() << " position_y=" << drift.position.y()
+                   << " position_z=" << drift.position.z()
+                   << " quaternion_x=" << drift.orientation.x() << " quaternion_y=" << drift.orientation.y()
+                   << " quaternion_z=" << drift.orientation.z() << " quaternion_w=" << drift.orientation.w()
+                   << " velocity_x=" << drift.velocity.x() << " velocity_y=" << drift.velocity.y()
+                   << " velocity_z=" << drift.velocity.z()
+                   << " gyro_bias_x=" << drift.gyroBias.x() << " gyro_bias_y=" << drift.gyroBias.y()
+                   << " gyro_bias_z=" << drift.gyroBias.z()
+                   << " accel_bias_x=" << drift.accelBias.x() << " accel_bias_y=" << drift.accelBias.y()
+                   << " accel_bias_z=" << drift.accelBias.z()
+                   << " frame_translation=" << drift.frameTranslation
+                   << " frame_rotation_deg=" << drift.frameRotationDegrees
+                   << " opt_translation=" << drift.optimizationTranslation
+                   << " opt_rotation_deg=" << drift.optimizationRotationDegrees
+                   << " opt_velocity=" << drift.optimizationVelocity
+                   << " opt_gyro_bias=" << drift.optimizationGyroBias
+                   << " opt_accel_bias=" << drift.optimizationAccelBias
+                   << " support_keypoints=" << drift.keypoints
+                   << " support_finite=" << drift.finite
+                   << " support_pending=" << drift.pending
+                   << " support_uninitialized=" << drift.uninitialized
+                   << " support_invalid_initialized=" << drift.invalidInitialized
+                   << " support_unassociated=" << drift.unassociated
+                   << " camera_keypoints=" << commaSeparated(drift.cameraKeypoints)
+                   << " camera_finite=" << commaSeparated(drift.cameraFinite)
+                   << " camera_pending=" << commaSeparated(drift.cameraPending)
+                   << " camera_uninitialized=" << commaSeparated(drift.cameraUninitialized)
+                   << " camera_invalid_initialized=" << commaSeparated(drift.cameraInvalidInitialized)
+                   << " camera_unassociated=" << commaSeparated(drift.cameraUnassociated)
+                   << " camera_coverage_cells=" << commaSeparated(drift.cameraFiniteCoverageCells)
+                   << " geometry_current_camera_range_valid_count="
+                   << commaSeparated(drift.geometryCurrentCameraRangeValidCount)
+                   << " geometry_current_camera_range_p10="
+                   << commaSeparatedDoubles(drift.geometryCurrentCameraRangeP10)
+                   << " geometry_current_camera_range_p50="
+                   << commaSeparatedDoubles(drift.geometryCurrentCameraRangeP50)
+                   << " geometry_current_camera_range_p90="
+                   << commaSeparatedDoubles(drift.geometryCurrentCameraRangeP90)
+                   << " geometry_current_camera_depth_valid_count="
+                   << commaSeparated(drift.geometryCurrentCameraDepthValidCount)
+                   << " geometry_current_camera_depth_p10="
+                   << commaSeparatedDoubles(drift.geometryCurrentCameraDepthP10)
+                   << " geometry_current_camera_depth_p50="
+                   << commaSeparatedDoubles(drift.geometryCurrentCameraDepthP50)
+                   << " geometry_current_camera_depth_p90="
+                   << commaSeparatedDoubles(drift.geometryCurrentCameraDepthP90)
+                   << " geometry_active_observation_count_valid="
+                   << drift.geometryActiveObservationCountValid
+                   << " geometry_active_observation_count_p10="
+                   << drift.geometryActiveObservationCountP10
+                   << " geometry_active_observation_count_p50="
+                   << drift.geometryActiveObservationCountP50
+                   << " geometry_active_observation_count_p90="
+                   << drift.geometryActiveObservationCountP90
+                   << " geometry_active_frame_span_valid=" << drift.geometryActiveFrameSpanValid
+                   << " geometry_active_frame_span_s_p10=" << drift.geometryActiveFrameSpanP10
+                   << " geometry_active_frame_span_s_p50=" << drift.geometryActiveFrameSpanP50
+                   << " geometry_active_frame_span_s_p90=" << drift.geometryActiveFrameSpanP90
+                   << " geometry_multiview_parallax_valid=" << drift.geometryParallaxValid
+                   << " geometry_multiview_parallax_deg_p10=" << drift.geometryParallaxP10
+                   << " geometry_multiview_parallax_deg_p50=" << drift.geometryParallaxP50
+                   << " geometry_multiview_parallax_deg_p90=" << drift.geometryParallaxP90
+                   << " geometry_translation_info_surrogate_observation_count="
+                   << drift.geometryTranslationInfoObservationCount
+                   << " geometry_translation_info_surrogate_eigen_min="
+                   << drift.geometryTranslationInfoEigenMin
+                   << " geometry_translation_info_surrogate_eigen_median="
+                   << drift.geometryTranslationInfoEigenMedian
+                   << " geometry_translation_info_surrogate_eigen_max="
+                   << drift.geometryTranslationInfoEigenMax
+                   << " geometry_translation_info_surrogate_effective_rank="
+                   << drift.geometryTranslationInfoEffectiveRank
+                   << " geometry_translation_info_surrogate_condition_number="
+                   << drift.geometryTranslationInfoConditionNumber
+                   << " finite_coverage_cells=" << drift.finiteCoverageCells
+                   << " finite_coverage_possible=" << drift.finiteCoverageCellsPossible
+                   << " estimator_reproj_pre_p50=" << drift.reprojectionPreP50
+                   << " estimator_reproj_pre_p90=" << drift.reprojectionPreP90
+                   << " estimator_reproj_pre_count=" << drift.reprojectionPreCount
+                   << " estimator_reproj_pre_invalid=" << drift.reprojectionPreInvalid
+                   << " estimator_reproj_post_p50=" << drift.reprojectionPostP50
+                   << " estimator_reproj_post_p90=" << drift.reprojectionPostP90
+                   << " estimator_reproj_post_max=" << drift.reprojectionPostMax
+                   << " estimator_reproj_post_over4=" << drift.reprojectionPostFractionOver4
+                   << " estimator_reproj_post_over9=" << drift.reprojectionPostFractionOver9
+                   << " estimator_reproj_post_count=" << drift.reprojectionPostCount
+                   << " estimator_reproj_post_invalid=" << drift.reprojectionPostInvalid
+                   << " window_frames=" << drift.activeFrames
+                   << " window_keyframes=" << drift.activeKeyframes
+                   << " pre_marg_frames=" << drift.preMarginalizationFrames
+                   << " pre_marg_landmarks=" << drift.preMarginalizationLandmarks
+                   << " marginalized_landmarks=" << drift.marginalizedLandmarks
+                   << " map_landmarks=" << drift.activeLandmarks
+                   << " map_initialized=" << drift.activeInitializedLandmarks
+                   << " opt_initial_cost=" << drift.optimizationInitialCost
+                   << " opt_final_cost=" << drift.optimizationFinalCost
+                   << " opt_iterations=" << drift.optimizationIterations
+                   << " opt_successful_steps=" << drift.optimizationSuccessfulSteps
+                   << " opt_unsuccessful_steps=" << drift.optimizationUnsuccessfulSteps
+                   << " opt_termination=" << drift.optimizationTerminationType
+                   << " opt_usable=" << drift.optimizationUsable
+                   << " opt_time_s=" << drift.optimizationTimeSeconds;
+        driftDiagnosticLine = diagnostic.str();
       }
 
       optimizationDone_ = true;
     }  // unlock mutex
+    if (driftDiagnosticShouldEmit && !driftDiagnosticLine.empty() && visualizationDataPtr) {
+      LOG(INFO) << driftDiagnosticLine;
+    }
     optimizationNotification_.notify_all();
     featureStateNotification_.notify_all();
 
@@ -1370,7 +1996,7 @@ void ThreadedKFVio::optimizationLoop() {
     optimizationResults_.Push(result);
 
     // adding further elements to visualization data that do not access estimator
-    if (parameters_.visualization.displayImages || debugImgCallback_) {
+    if ((parameters_.visualization.displayImages || debugImgCallback_) && visualizationDataPtr) {
       visualizationDataPtr->currentFrames = frame_pairs;
       visualizationData_.PushNonBlockingDroppingIfFull(visualizationDataPtr, 1);
     }

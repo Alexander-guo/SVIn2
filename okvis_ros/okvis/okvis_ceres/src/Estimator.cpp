@@ -928,6 +928,19 @@ void Estimator::optimize(size_t numIter, size_t numThreads, bool verbose) {
   }
 }
 
+Estimator::OptimizationDiagnostics Estimator::optimizationDiagnostics() const {
+  OptimizationDiagnostics diagnostics;
+  diagnostics.iterations = static_cast<int>(mapPtr_->summary.iterations.size());
+  diagnostics.successfulSteps = mapPtr_->summary.num_successful_steps;
+  diagnostics.unsuccessfulSteps = mapPtr_->summary.num_unsuccessful_steps;
+  diagnostics.terminationType = static_cast<int>(mapPtr_->summary.termination_type);
+  diagnostics.initialCost = mapPtr_->summary.initial_cost;
+  diagnostics.finalCost = mapPtr_->summary.final_cost;
+  diagnostics.totalTimeSeconds = mapPtr_->summary.total_time_in_seconds;
+  diagnostics.solutionUsable = mapPtr_->summary.IsSolutionUsable();
+  return diagnostics;
+}
+
 // Set a time limit for the optimization process.
 bool Estimator::setOptimizationTimeLimit(double timeLimit, int minIterations) {
   if (ceresCallback_ != nullptr) {
