@@ -133,6 +133,16 @@ void VioParametersReader::readConfigFile(const std::string& filename) {
   OKVIS_ASSERT_TRUE(Exception, success, "'detection threshold' parameter missing in configuration file.");
   file["detection_options"]["threshold"] >> vioParameters_.optimization.detectionThreshold;
 
+  // Optional for backwards compatibility: this was historically hard-coded in Frontend to 800.0.
+  const cv::FileNode detectionAbsoluteThreshold = file["detection_options"]["absoluteThreshold"];
+  if (!detectionAbsoluteThreshold.empty()) {
+    success = detectionAbsoluteThreshold.isReal() || detectionAbsoluteThreshold.isInt();
+    OKVIS_ASSERT_TRUE(Exception, success, "'detection absoluteThreshold' must be numeric.");
+    detectionAbsoluteThreshold >> vioParameters_.optimization.detectionAbsoluteThreshold;
+    OKVIS_ASSERT_TRUE(Exception, vioParameters_.optimization.detectionAbsoluteThreshold >= 0.0,
+                      "'detection absoluteThreshold' must not be negative.");
+  }
+
   // detection octaves
   success = file["detection_options"]["octaves"].isInt();
   OKVIS_ASSERT_TRUE(Exception, success, "'detection octaves' parameter missing in configuration file.");

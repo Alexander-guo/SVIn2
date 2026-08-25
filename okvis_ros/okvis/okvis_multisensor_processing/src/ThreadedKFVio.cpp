@@ -191,6 +191,7 @@ void ThreadedKFVio::init() {
 
   frontend_.setBriskDetectionOctaves(parameters_.optimization.detectionOctaves);
   frontend_.setBriskDetectionThreshold(parameters_.optimization.detectionThreshold);
+  frontend_.setBriskDetectionAbsoluteThreshold(parameters_.optimization.detectionAbsoluteThreshold);
   frontend_.setBriskDetectionMaximumKeypoints(parameters_.optimization.maxNoKeypoints);
 
   lastOptimizedStateTimestamp_ =
