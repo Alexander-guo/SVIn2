@@ -70,7 +70,7 @@ def generate_launch_description():
 
   use_pose_graph_arg = DeclareLaunchArgument(
     'use_pose_graph',
-    default_value='false'
+    default_value='true'
   )
 
    # Uncompressor nodes
