@@ -65,6 +65,7 @@
 #include <okvis/cameras/PinholeCamera.hpp>
 #include <okvis/cameras/RadialTangentialDistortion.hpp>
 #include <okvis/cameras/RadialTangentialDistortion8.hpp>
+#include <okvis/RansacPoseDiagnostics.hpp>
 #include <sstream>
 #include <vector>
 // Kneip RANSAC
@@ -89,6 +90,41 @@ std::string spatialCounts(const std::vector<size_t>& values) {
     stream << values[index];
   }
   return stream.str();
+}
+
+double safeRatio(size_t numerator, size_t denominator) {
+  return denominator == 0 ? 0.0 : static_cast<double>(numerator) / static_cast<double>(denominator);
+}
+
+size_t finiteSupportInCurrentFrame(const Estimator& estimator,
+                                   const std::shared_ptr<MultiFrame>& frame) {
+  if (!frame) return 0;
+  size_t count = 0;
+  for (size_t camera = 0; camera < frame->numFrames(); ++camera) {
+    for (size_t keypoint = 0; keypoint < frame->numKeypoints(camera); ++keypoint) {
+      const uint64_t id = frame->landmarkId(camera, keypoint);
+      if (id != 0 && estimator.isLandmarkAdded(id) && estimator.isLandmarkInitialized(id)) ++count;
+    }
+  }
+  return count;
+}
+
+struct PendingIntensityCounts {
+  size_t total = 0;
+  size_t originalBright = 0;
+  size_t originalDark = 0;
+  size_t originalUnknown = 0;
+};
+
+void incrementPendingIntensity(uint8_t flags, PendingIntensityCounts* counts) {
+  ++counts->total;
+  if ((flags & Frame::PreHistogramIntensityValid) == 0) {
+    ++counts->originalUnknown;
+  } else if ((flags & Frame::PreHistogramDark) != 0) {
+    ++counts->originalDark;
+  } else {
+    ++counts->originalBright;
+  }
 }
 
 }  // namespace
@@ -611,7 +647,7 @@ int Frontend::matchToLastFrame(okvis::Estimator& estimator,
     // LOG(INFO) << "Number of matches to last frame (3D-2D): " << matchingAlgorithm.numMatches();
   }
 
-  runRansac3d2d(estimator, params.nCameraSystem, estimator.multiFrame(currentFrameId), removeOutliers);
+  runRansac3d2d(estimator, params.nCameraSystem, estimator.multiFrame(currentFrameId), removeOutliers, true);
 
   for (size_t im = 0; im < params.nCameraSystem.numCameras(); ++im) {
     MATCHING_ALGORITHM matchingAlgorithm(
@@ -640,7 +676,8 @@ int Frontend::matchToLastFrame(okvis::Estimator& estimator,
   // remove outliers
   bool rotationOnly = false;
   const int bearingRansacInliers =
-      runRansac2d2d(estimator, params, currentFrameId, lastFrameId, false, removeOutliers, rotationOnly);
+      runRansac2d2d(estimator, params, currentFrameId, lastFrameId, false, removeOutliers,
+                    rotationOnly, true);
     LOG_EVERY_N(INFO, 10000) << "[BEARING_RANSAC_DIAGNOSTIC] context=last_frame"
                         << " frame_a=" << lastFrameId << " frame_b=" << currentFrameId
                         << " inliers=" << bearingRansacInliers << " rotation_only=" << rotationOnly;
@@ -814,7 +851,8 @@ void Frontend::matchStereo(okvis::Estimator& estimator,
 int Frontend::runRansac3d2d(okvis::Estimator& estimator,
                             const okvis::cameras::NCameraSystem& nCameraSystem,
                             std::shared_ptr<okvis::MultiFrame> currentFrame,
-                            bool removeOutliers) {
+                            bool removeOutliers,
+                            bool lastFrameDiagnostics) {
   if (estimator.numFrames() < 2) {
     // nothing to match against, we are just starting up.
     return 1;
@@ -829,7 +867,21 @@ int Frontend::runRansac3d2d(okvis::Estimator& estimator,
   opengv::absolute_pose::FrameNoncentralAbsoluteAdapter adapter(estimator, nCameraSystem, currentFrame);
 
   size_t numCorrespondences = adapter.getNumberCorrespondences();
-  if (numCorrespondences < 5) return numCorrespondences;
+  const bool diagnosticsEnabled = featureDistributionDiagnosticsOptIn() && lastFrameDiagnostics && isInitialized_;
+  const size_t finiteSupport = diagnosticsEnabled ? finiteSupportInCurrentFrame(estimator, currentFrame) : 0;
+  const int64_t diagnosticSecond = static_cast<int64_t>(std::floor(currentFrame->timestamp().toSec()));
+  const bool emitDiagnostic = ransac3d2dDiagnosticRateLimiter_.shouldEmit(
+      diagnosticsEnabled, currentFrame->id(), diagnosticSecond, finiteSupport);
+  if (numCorrespondences < 5) {
+    if (emitDiagnostic) {
+      LOG(INFO) << "[RANSAC_POSE_MODEL_DIAGNOSTIC] family=3d2d context=last_frame"
+                << " timestamp=" << std::setprecision(15) << currentFrame->timestamp().toSec()
+                << " frame=" << currentFrame->id() << " finite_support=" << finiteSupport
+                << " correspondences=" << numCorrespondences << " model=none inliers=0 ratio=0"
+                << " eligible=0 eligibility_reason=few_correspondences";
+    }
+    return numCorrespondences;
+  }
 
   // create a RelativePoseSac problem and RANSAC
   opengv::sac::Ransac<opengv::sac_problems::absolute_pose::FrameAbsolutePoseSacProblem> ransac;
@@ -841,10 +893,42 @@ int Frontend::runRansac3d2d(okvis::Estimator& estimator,
   ransac.max_iterations_ = 50;
   // initial guess not needed...
   // run the ransac
-  ransac.computeModel(0);
+  const bool modelSuccess = ransac.computeModel(0);
 
   // assign transformation
   numInliers = ransac.inliers_.size();
+  if (emitDiagnostic) {
+    double rotationDeltaDeg = std::numeric_limits<double>::quiet_NaN();
+    double translationDeltaMeters = std::numeric_limits<double>::quiet_NaN();
+    Eigen::Quaterniond modelQuaternion = Eigen::Quaterniond::Identity();
+    Eigen::Vector3d modelTranslation = Eigen::Vector3d::Zero();
+    if (modelSuccess) {
+      modelQuaternion = Eigen::Quaterniond(ransac.model_coefficients_.leftCols<3>());
+      modelTranslation = ransac.model_coefficients_.col(3);
+      okvis::kinematics::Transformation T_WS;
+      estimator.get_T_WS(currentFrame->id(), T_WS);
+      rotationDeltaDeg = ransac_pose_diagnostics::rotationDeltaDegrees(
+          ransac.model_coefficients_.leftCols<3>(), T_WS.C());
+      translationDeltaMeters = (modelTranslation - T_WS.r()).norm();
+    }
+    const double inlierRatio = safeRatio(numInliers, numCorrespondences);
+    const auto eligibility = ransac_pose_diagnostics::absolutePoseEligibility(
+        modelSuccess, numCorrespondences, numInliers, inlierRatio, rotationDeltaDeg,
+        translationDeltaMeters);
+    LOG(INFO) << "[RANSAC_POSE_MODEL_DIAGNOSTIC] family=3d2d context=last_frame"
+              << " timestamp=" << std::setprecision(15) << currentFrame->timestamp().toSec()
+              << " frame=" << currentFrame->id() << " finite_support=" << finiteSupport
+              << " correspondences=" << numCorrespondences << " model=gp3p"
+              << " model_success=" << modelSuccess << " inliers=" << numInliers
+              << " ratio=" << inlierRatio << " model_tx=" << modelTranslation.x()
+              << " model_ty=" << modelTranslation.y() << " model_tz=" << modelTranslation.z()
+              << " model_qx=" << modelQuaternion.x() << " model_qy=" << modelQuaternion.y()
+              << " model_qz=" << modelQuaternion.z() << " model_qw=" << modelQuaternion.w()
+              << " propagated_delta_rotation_deg=" << rotationDeltaDeg
+              << " propagated_delta_translation_m=" << translationDeltaMeters
+              << " eligible=" << eligibility.eligible
+              << " eligibility_reason=" << eligibility.reason;
+  }
   if (numInliers >= 10) {
     // kick out outliers:
     std::vector<bool> inliers(numCorrespondences, false);
@@ -1036,7 +1120,8 @@ int Frontend::runRansac2d2d(okvis::Estimator& estimator,
                             uint64_t olderFrameId,
                             bool initializePose,
                             bool removeOutliers,
-                            bool& rotationOnly) {
+                            bool& rotationOnly,
+                            bool lastFrameDiagnostics) {
   // match 2d2d
   rotationOnly = false;
   const size_t numCameras = params.nCameraSystem.numCameras();
@@ -1053,8 +1138,39 @@ int Frontend::runRansac2d2d(okvis::Estimator& estimator,
 
     size_t numCorrespondences = adapter.getNumberCorrespondences();
 
-    if (numCorrespondences < 10)
+    const std::shared_ptr<okvis::MultiFrame> diagnosticFrame = estimator.multiFrame(currentFrameId);
+    const bool diagnosticsEnabled = featureDistributionDiagnosticsOptIn() && lastFrameDiagnostics && isInitialized_;
+    const size_t finiteSupport = diagnosticsEnabled ? finiteSupportInCurrentFrame(estimator, diagnosticFrame) : 0;
+    const int64_t diagnosticSecond = static_cast<int64_t>(std::floor(diagnosticFrame->timestamp().toSec()));
+    const bool emitDiagnostic = ransac2d2dDiagnosticRateLimiter_.shouldEmit(
+        diagnosticsEnabled, currentFrameId, diagnosticSecond, finiteSupport);
+    PendingIntensityCounts pendingCounts;
+    if (emitDiagnostic) {
+      for (size_t k = 0; k < numCorrespondences; ++k) {
+        const size_t idxB = adapter.getMatchKeypointIdxB(k);
+        const uint64_t id = diagnosticFrame->landmarkId(im, idxB);
+        if (id != 0 && !estimator.isLandmarkAdded(id)) {
+          incrementPendingIntensity(diagnosticFrame->keypointIntensityFlags(im, idxB), &pendingCounts);
+        }
+      }
+    }
+
+    if (numCorrespondences < 10) {
+      if (emitDiagnostic) {
+        LOG(INFO) << "[RANSAC_POSE_MODEL_DIAGNOSTIC] family=2d2d context=last_frame"
+                  << " timestamp=" << std::setprecision(15) << diagnosticFrame->timestamp().toSec()
+                  << " frame_a=" << olderFrameId << " frame_b=" << currentFrameId
+                  << " camera=" << im << " finite_support=" << finiteSupport
+                  << " correspondences=" << numCorrespondences
+                  << " pending_correspondences=" << pendingCounts.total
+                  << " pending_original_bright=" << pendingCounts.originalBright
+                  << " pending_original_dark=" << pendingCounts.originalDark
+                  << " pending_original_unknown=" << pendingCounts.originalUnknown
+                  << " model=none inliers=0 ratio=0 eligible=0"
+                  << " eligibility_reason=few_correspondences translation_semantics=nonmetric_direction_only";
+      }
       continue;  // won't generate meaningful results. let's hope the few correspondences we have are all inliers!!
+    }
 
     // try both the rotation-only RANSAC and the relative one:
 
@@ -1067,7 +1183,7 @@ int Frontend::runRansac2d2d(okvis::Estimator& estimator,
     rotation_only_ransac.max_iterations_ = 50;
 
     // run the ransac
-    rotation_only_ransac.computeModel(0);
+    const bool rotationModelSuccess = rotation_only_ransac.computeModel(0);
 
     // get quality
     int rotation_only_inliers = rotation_only_ransac.inliers_.size();
@@ -1083,7 +1199,7 @@ int Frontend::runRansac2d2d(okvis::Estimator& estimator,
     rel_pose_ransac.max_iterations_ = 50;
 
     // run the ransac
-    rel_pose_ransac.computeModel(0);
+    const bool relativeModelSuccess = rel_pose_ransac.computeModel(0);
 
     // assess success
     int rel_pose_inliers = rel_pose_ransac.inliers_.size();
@@ -1091,7 +1207,8 @@ int Frontend::runRansac2d2d(okvis::Estimator& estimator,
 
     // decide on success and fill inliers
     std::vector<bool> inliers(numCorrespondences, false);
-    if (rotation_only_ratio > rel_pose_ratio || rotation_only_ratio > 0.8) {
+    const bool choseRotationOnly = rotation_only_ratio > rel_pose_ratio || rotation_only_ratio > 0.8;
+    if (choseRotationOnly) {
       if (rotation_only_inliers > 10) {
         rotation_only_success = true;
       }
@@ -1108,6 +1225,58 @@ int Frontend::runRansac2d2d(okvis::Estimator& estimator,
       for (size_t k = 0; k < rel_pose_ransac.inliers_.size(); ++k) {
         inliers.at(rel_pose_ransac.inliers_.at(k)) = true;
       }
+    }
+
+    if (emitDiagnostic) {
+      Eigen::Matrix3d modelRotation = Eigen::Matrix3d::Identity();
+      Eigen::Vector3d modelTranslation = Eigen::Vector3d::Zero();
+      const bool chosenModelSuccess = choseRotationOnly ? rotationModelSuccess : relativeModelSuccess;
+      const size_t chosenInliers = choseRotationOnly ? rotation_only_inliers : rel_pose_inliers;
+      const double chosenRatio = choseRotationOnly ? rotation_only_ratio : rel_pose_ratio;
+      if (chosenModelSuccess) {
+        modelRotation = choseRotationOnly ? rotation_only_ransac.model_coefficients_
+                                          : rel_pose_ransac.model_coefficients_.leftCols<3>();
+        if (!choseRotationOnly) modelTranslation = rel_pose_ransac.model_coefficients_.col(3);
+      }
+      okvis::kinematics::Transformation T_WSa, T_SCa, T_WSb, T_SCb;
+      estimator.get_T_WS(olderFrameId, T_WSa);
+      estimator.getCameraSensorStates(olderFrameId, im, T_SCa);
+      estimator.get_T_WS(currentFrameId, T_WSb);
+      estimator.getCameraSensorStates(currentFrameId, im, T_SCb);
+      const okvis::kinematics::Transformation propagatedRelative =
+          ransac_pose_diagnostics::estimatorRelativeCameraPose(T_WSa, T_SCa, T_WSb, T_SCb);
+      const double rotationDeltaDeg = chosenModelSuccess
+          ? ransac_pose_diagnostics::rotationDeltaDegrees(modelRotation, propagatedRelative.C())
+          : std::numeric_limits<double>::quiet_NaN();
+      const double directionAgreement = (!choseRotationOnly && chosenModelSuccess)
+          ? ransac_pose_diagnostics::directionCosine(modelTranslation, propagatedRelative.r())
+          : std::numeric_limits<double>::quiet_NaN();
+      const auto eligibility = ransac_pose_diagnostics::relativeRotationEligibility(
+          chosenModelSuccess, numCorrespondences, chosenInliers, chosenRatio, rotationDeltaDeg);
+      const Eigen::Quaterniond modelQuaternion(modelRotation);
+      LOG(INFO) << "[RANSAC_POSE_MODEL_DIAGNOSTIC] family=2d2d context=last_frame"
+                << " timestamp=" << std::setprecision(15) << diagnosticFrame->timestamp().toSec()
+                << " frame_a=" << olderFrameId << " frame_b=" << currentFrameId
+                << " camera=" << im << " finite_support=" << finiteSupport
+                << " correspondences=" << numCorrespondences
+                << " pending_correspondences=" << pendingCounts.total
+                << " pending_original_bright=" << pendingCounts.originalBright
+                << " pending_original_dark=" << pendingCounts.originalDark
+                << " pending_original_unknown=" << pendingCounts.originalUnknown
+                << " rotation_inliers=" << rotation_only_inliers
+                << " rotation_ratio=" << rotation_only_ratio
+                << " relative_inliers=" << rel_pose_inliers << " relative_ratio=" << rel_pose_ratio
+                << " model=" << (choseRotationOnly ? "rotation_only" : "relative_pose")
+                << " model_success=" << chosenModelSuccess << " inliers=" << chosenInliers
+                << " ratio=" << chosenRatio << " model_qx=" << modelQuaternion.x()
+                << " model_qy=" << modelQuaternion.y() << " model_qz=" << modelQuaternion.z()
+                << " model_qw=" << modelQuaternion.w()
+                << " propagated_delta_rotation_deg=" << rotationDeltaDeg
+                << " translation_direction_cosine=" << directionAgreement
+                << " translation_semantics=nonmetric_direction_only"
+                << " propagated_translation_norm_m=" << propagatedRelative.r().norm()
+                << " eligible=" << eligibility.eligible
+                << " eligibility_reason=" << eligibility.reason;
     }
 
     // failure?

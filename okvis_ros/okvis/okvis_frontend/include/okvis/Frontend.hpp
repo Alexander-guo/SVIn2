@@ -45,6 +45,7 @@
 #include <mutex>
 #include <okvis/DenseMatcher.hpp>
 #include <okvis/Estimator.hpp>
+#include <okvis/RansacPoseDiagnostics.hpp>
 #include <okvis/SpatialKeypointBalancer.hpp>
 #include <okvis/VioFrontendInterface.hpp>
 #include <okvis/assert_macros.hpp>
@@ -285,6 +286,8 @@ class Frontend : public VioFrontendInterface {
   SpatialBalancingParams spatialBalancingParameters_;
   int imagePreprocessingTileGridSize_ = 8;
   std::vector<int64_t> lastFeatureDiagnosticSecond_;
+  ransac_pose_diagnostics::RateLimiter ransac3d2dDiagnosticRateLimiter_;
+  ransac_pose_diagnostics::RateLimiter ransac2d2dDiagnosticRateLimiter_;
 
   /// @}
   /// @name BRISK descriptor extractor parameters
@@ -392,7 +395,8 @@ class Frontend : public VioFrontendInterface {
   int runRansac3d2d(okvis::Estimator& estimator,  // NOLINT
                     const okvis::cameras::NCameraSystem& nCameraSystem,
                     std::shared_ptr<okvis::MultiFrame> currentFrame,
-                    bool removeOutliers);
+                    bool removeOutliers,
+                    bool lastFrameDiagnostics = false);
 
   /**
    * @brief Perform 2D/2D RANSAC.
@@ -412,7 +416,8 @@ class Frontend : public VioFrontendInterface {
                     uint64_t olderFrameId,
                     bool initializePose,
                     bool removeOutliers,
-                    bool& rotationOnly);  // NOLINT
+                    bool& rotationOnly,  // NOLINT
+                    bool lastFrameDiagnostics = false);
   // Added by Sharmin
   int runRansac2d2dToRefineScale(okvis::Estimator& estimator,  // NOLINT
                                  const okvis::VioParameters& params,

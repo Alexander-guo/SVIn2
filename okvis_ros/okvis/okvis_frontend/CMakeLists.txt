@@ -62,6 +62,7 @@ if(BUILD_TESTS)
     test/TestDeferredBearingTracks.cpp
     test/TestDeterministicFeatureProduction.cpp
     test/TestDeterministicOpenGVRansac.cpp
+    test/TestRansacPoseDiagnostics.cpp
     test/TestSpatialKeypointBalancer.cpp
     test/TestStereoTriangulation.cpp
   )
