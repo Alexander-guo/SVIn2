@@ -1323,6 +1323,29 @@ void ThreadedKFVio::optimizationLoop() {
 
       const size_t preMarginalizationFrames = estimator_.numFrames();
       const size_t preMarginalizationLandmarks = estimator_.numLandmarks();
+      std::map<uint64_t, size_t> preMarginalizationCohort;
+      std::array<size_t, 3> preMarginalizationCohortCounts{};
+      if (driftDiagnosticsOptIn()) {
+        okvis::MapPointVector preLandmarks;
+        estimator_.getLandmarks(preLandmarks);
+        for (const okvis::MapPoint& landmark : preLandmarks) {
+          size_t cohort = 0;
+          double oldestTimestamp = std::numeric_limits<double>::infinity();
+          for (const auto& observation : landmark.observations) {
+            const okvis::MultiFramePtr observationFrame = estimator_.multiFrame(observation.first.frameId);
+            const double timestamp = observationFrame->timestamp().toSec();
+            if (timestamp >= oldestTimestamp) continue;
+            oldestTimestamp = timestamp;
+            const uint8_t flags = observationFrame->keypointIntensityFlags(
+                observation.first.cameraIndex, observation.first.keypointIndex);
+            cohort = (flags & okvis::Frame::PreHistogramIntensityValid) == 0
+                         ? 0
+                         : ((flags & okvis::Frame::PreHistogramDark) != 0 ? 2 : 1);
+          }
+          preMarginalizationCohort.emplace(landmark.id, cohort);
+          ++preMarginalizationCohortCounts[cohort];
+        }
+      }
 
       // get timestamp of last frame in IMU window. Need to do this before marginalization as it will be removed there
       // (if not keyframe)
@@ -1336,6 +1359,67 @@ void ThreadedKFVio::optimizationLoop() {
       estimator_.applyMarginalizationStrategy(
           parameters_.optimization.numKeyframes, parameters_.optimization.numImuFrames, result.transferredLandmarks);
       marginalizationTimer.stop();
+      if (driftDiagnosticsOptIn()) {
+        std::array<size_t, 3> removedCohortCounts{};
+        std::array<size_t, 3> removedFiniteCohortCounts{};
+        struct RemovedLandmarkSample {
+          uint64_t id;
+          size_t cohort;
+          size_t observations;
+        };
+        std::vector<RemovedLandmarkSample> removedLandmarkSamples;
+        removedLandmarkSamples.reserve(result.transferredLandmarks.size());
+        for (const okvis::MapPoint& landmark : result.transferredLandmarks) {
+          const auto cohortIterator = preMarginalizationCohort.find(landmark.id);
+          const size_t cohort = cohortIterator == preMarginalizationCohort.end() ? 0 : cohortIterator->second;
+          ++removedCohortCounts[cohort];
+          if (landmark.point.allFinite() && std::abs(landmark.point.w()) > 1.0e-8) {
+            ++removedFiniteCohortCounts[cohort];
+          }
+          removedLandmarkSamples.push_back(
+              RemovedLandmarkSample{landmark.id, cohort, landmark.observations.size()});
+        }
+        std::sort(removedLandmarkSamples.begin(), removedLandmarkSamples.end(),
+                  [](const RemovedLandmarkSample& lhs, const RemovedLandmarkSample& rhs) {
+                    return std::tie(lhs.cohort, lhs.id) > std::tie(rhs.cohort, rhs.id);
+                  });
+        std::ostringstream removedSamples;
+        for (size_t index = 0; index < std::min<size_t>(removedLandmarkSamples.size(), 16); ++index) {
+          if (index != 0) removedSamples << ';';
+          const RemovedLandmarkSample& sample = removedLandmarkSamples[index];
+          removedSamples << sample.id << ':' << sample.cohort << ':' << sample.observations;
+        }
+        std::array<size_t, 3> retainedCohortCounts{};
+        okvis::MapPointVector retainedLandmarks;
+        estimator_.getLandmarks(retainedLandmarks);
+        for (const okvis::MapPoint& landmark : retainedLandmarks) {
+          const auto cohortIterator = preMarginalizationCohort.find(landmark.id);
+          const size_t cohort = cohortIterator == preMarginalizationCohort.end() ? 0 : cohortIterator->second;
+          ++retainedCohortCounts[cohort];
+        }
+        static std::atomic<size_t> lifecycleRecords{0};
+        static std::atomic<int64_t> lifecycleSecond{std::numeric_limits<int64_t>::min()};
+        const size_t record = lifecycleRecords.fetch_add(1, std::memory_order_relaxed) + 1;
+        const int64_t second = static_cast<int64_t>(std::floor(frame_pairs->timestamp().toSec()));
+        const int64_t previousSecond = lifecycleSecond.exchange(second, std::memory_order_relaxed);
+        if (record <= 30 || previousSecond != second) {
+          const auto arrayText = [](const std::array<size_t, 3>& values) {
+            std::ostringstream stream;
+            stream << values[0] << ',' << values[1] << ',' << values[2];
+            return stream.str();
+          };
+          LOG(INFO) << "[LANDMARK_LIFECYCLE_DIAGNOSTIC] timestamp=" << std::setprecision(17)
+                    << frame_pairs->timestamp().toSec() << " frame=" << frame_pairs->id()
+                    << " cohort_definition=oldest_active_observation"
+                    << " cohort_order=unknown,original_bright,original_dark"
+                    << " pre=" << arrayText(preMarginalizationCohortCounts)
+                    << " removed=" << arrayText(removedCohortCounts)
+                    << " removed_finite=" << arrayText(removedFiniteCohortCounts)
+                    << " retained=" << arrayText(retainedCohortCounts)
+                    << " removed_sample_schema=id:cohort:observations"
+                    << " removed_samples=" << (removedSamples.str().empty() ? "none" : removedSamples.str());
+        }
+      }
       afterOptimizationTimer.start();
 
       // now actually remove measurements
@@ -1531,6 +1615,12 @@ void ThreadedKFVio::optimizationLoop() {
         drift.cameraUninitialized.assign(frame_pairs->numFrames(), 0);
         drift.cameraInvalidInitialized.assign(frame_pairs->numFrames(), 0);
         drift.cameraFiniteCoverageCells.assign(frame_pairs->numFrames(), 0);
+        const bool cellDiagnosticsEnabled = driftDiagnosticsOptIn();
+        if (cellDiagnosticsEnabled) {
+          drift.cameraCellKeypoints.assign(frame_pairs->numFrames() * 16, 0);
+          drift.cameraCellTracked.assign(frame_pairs->numFrames() * 16, 0);
+          drift.cameraCellFinite.assign(frame_pairs->numFrames() * 16, 0);
+        }
         // Pending IDs are also assigned to otherwise-unmatched singleton
         // keypoints by the frontend. Count occurrences under estimator_mutex_
         // so visualization and diagnostics can distinguish those IDs from
@@ -1570,6 +1660,23 @@ void ThreadedKFVio::optimizationLoop() {
               it->activeWindowOccurrences = pendingTrackImages[it->landmarkId].size();
               it->activeWindowDistinctFrames = pendingTrackFrames[it->landmarkId].size();
             }
+            const cv::Mat& diagnosticImage = frame_pairs->image(camIndex);
+            size_t diagnosticCell = camIndex * 16;
+            bool diagnosticCellValid = false;
+            if (cellDiagnosticsEnabled && !diagnosticImage.empty() &&
+                it->keypointMeasurement.allFinite() &&
+                it->keypointMeasurement[0] >= 0.0 && it->keypointMeasurement[1] >= 0.0 &&
+                it->keypointMeasurement[0] < diagnosticImage.cols &&
+                it->keypointMeasurement[1] < diagnosticImage.rows) {
+              const int diagnosticColumn = std::clamp(
+                  static_cast<int>(4.0 * it->keypointMeasurement[0] / diagnosticImage.cols), 0, 3);
+              const int diagnosticRow = std::clamp(
+                  static_cast<int>(4.0 * it->keypointMeasurement[1] / diagnosticImage.rows), 0, 3);
+              diagnosticCell += static_cast<size_t>(diagnosticRow * 4 + diagnosticColumn);
+              diagnosticCellValid = true;
+              ++drift.cameraCellKeypoints[diagnosticCell];
+              if (observationIsGenuinelyTracked(*it)) ++drift.cameraCellTracked[diagnosticCell];
+            }
             ++drift.keypoints;
             ++drift.cameraKeypoints[camIndex];
             if (it->landmarkId == 0) {
@@ -1584,6 +1691,7 @@ void ThreadedKFVio::optimizationLoop() {
                 if (landmark.point.allFinite() && std::abs(landmark.point[3]) > 1.0e-8) {
                   ++drift.finite;
                   ++drift.cameraFinite[camIndex];
+                  if (diagnosticCellValid) ++drift.cameraCellFinite[diagnosticCell];
                 } else {
                   ++drift.invalidInitialized;
                   ++drift.cameraInvalidInitialized[camIndex];
@@ -1935,6 +2043,9 @@ void ThreadedKFVio::optimizationLoop() {
                    << " camera_invalid_initialized=" << commaSeparated(drift.cameraInvalidInitialized)
                    << " camera_unassociated=" << commaSeparated(drift.cameraUnassociated)
                    << " camera_coverage_cells=" << commaSeparated(drift.cameraFiniteCoverageCells)
+                   << " camera_cell_keypoints=" << commaSeparated(drift.cameraCellKeypoints)
+                   << " camera_cell_tracked=" << commaSeparated(drift.cameraCellTracked)
+                   << " camera_cell_finite=" << commaSeparated(drift.cameraCellFinite)
                    << " geometry_current_camera_range_valid_count="
                    << commaSeparated(drift.geometryCurrentCameraRangeValidCount)
                    << " geometry_current_camera_range_p10="

@@ -42,6 +42,7 @@
 #define INCLUDE_OKVIS_SUBSCRIBER_HPP_
 
 /// @Sharmin
+#include <atomic>
 #include <boost/shared_ptr.hpp>
 #include <deque>
 #include <image_transport/image_transport.hpp>
@@ -150,6 +151,8 @@ class Subscriber {
   std::vector<std::unique_ptr<ImagePreprocessor>> imagePreprocessors_;
   std::mutex imageDiagnosticsMutex_;
   std::vector<int64_t> lastImageDiagnosticSecond_;
+  bool driftDiagnosticsEnabled_ = false;
+  std::vector<std::unique_ptr<std::atomic<uint64_t>>> imageInputLossCounts_;
   /// @}
 
   okvis::VioInterface* vioInterface_;   ///< The VioInterface. (E.g. ThreadedKFVio)

@@ -91,6 +91,10 @@ class VioVisualizer {
       std::vector<size_t> cameraUninitialized;
       std::vector<size_t> cameraInvalidInitialized;
       std::vector<size_t> cameraFiniteCoverageCells;
+      /// Flattened camera-major 4x4 cell counts.
+      std::vector<size_t> cameraCellKeypoints;
+      std::vector<size_t> cameraCellTracked;
+      std::vector<size_t> cameraCellFinite;
       Eigen::Vector3d position = Eigen::Vector3d::Zero();
       Eigen::Quaterniond orientation = Eigen::Quaterniond::Identity();
       Eigen::Vector3d velocity = Eigen::Vector3d::Zero();

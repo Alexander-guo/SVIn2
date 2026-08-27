@@ -60,6 +60,7 @@ bool driftDiagnosticsOptIn() {
   const char* value = std::getenv("SVIN2_ENABLE_DRIFT_DIAGNOSTICS");
   return value != nullptr && std::strcmp(value, "1") == 0;
 }
+
 }  // namespace
 
 Subscriber::~Subscriber() { imgTransport_.release(); }
@@ -70,6 +71,7 @@ Subscriber::Subscriber(std::shared_ptr<rclcpp::Node> node,
     : node_(node), vioInterface_(vioInterfacePtr), imgTransport_(nullptr) {
   /// @Sharmin
   param_reader.getParameters(vioParameters_);
+  driftDiagnosticsEnabled_ = driftDiagnosticsOptIn();
 
   imageSubscribers_.resize(vioParameters_.nCameraSystem.numCameras());
   imagePreprocessors_.reserve(vioParameters_.nCameraSystem.numCameras());
@@ -78,6 +80,12 @@ Subscriber::Subscriber(std::shared_ptr<rclcpp::Node> node,
   }
   lastImageDiagnosticSecond_.assign(vioParameters_.nCameraSystem.numCameras(),
                                     std::numeric_limits<int64_t>::min());
+  if (driftDiagnosticsEnabled_) {
+    imageInputLossCounts_.reserve(vioParameters_.nCameraSystem.numCameras());
+    for (size_t cameraIndex = 0; cameraIndex < vioParameters_.nCameraSystem.numCameras(); ++cameraIndex) {
+      imageInputLossCounts_.emplace_back(std::make_unique<std::atomic<uint64_t>>(0));
+    }
+  }
 
   imgTransport_ = std::make_unique<image_transport::ImageTransport>(node);
 
@@ -147,6 +155,8 @@ Subscriber::Subscriber(std::shared_ptr<rclcpp::Node> node,
 void Subscriber::setT_Wc_W(okvis::kinematics::Transformation T_Wc_W) { vioParameters_.publishing.T_Wc_W = T_Wc_W; }
 
 void Subscriber::imageCallback(const sensor_msgs::msg::Image::ConstSharedPtr msg, unsigned int cameraIndex) {
+  const auto callbackStart = driftDiagnosticsEnabled_ ? std::chrono::steady_clock::now()
+                                                       : std::chrono::steady_clock::time_point{};
   if (frozen_) {
     return;  // frozen: ignore images
   }
@@ -178,7 +188,7 @@ void Subscriber::imageCallback(const sensor_msgs::msg::Image::ConstSharedPtr msg
 
   bool emitImageDiagnostic = false;
   const bool driftDiagnosticsEnabled = vioParameters_.visualization.displayImages ||
-                                       vioParameters_.visualization.publishDebugImages || driftDiagnosticsOptIn();
+                                       vioParameters_.visualization.publishDebugImages || driftDiagnosticsEnabled_;
   if (driftDiagnosticsEnabled) {
     const int64_t diagnosticSecond = static_cast<int64_t>(std::floor(t.toSec()));
     std::lock_guard<std::mutex> lock(imageDiagnosticsMutex_);
@@ -236,7 +246,7 @@ void Subscriber::imageCallback(const sensor_msgs::msg::Image::ConstSharedPtr msg
     // The opt-in path emits image quality without entering the visualization
     // queue.  This keeps displayImages/publishDebugImages behavior unchanged
     // and does not create, render, or publish a debug image.
-    if (driftDiagnosticsOptIn() && !vioParameters_.visualization.displayImages &&
+    if (driftDiagnosticsEnabled_ && !vioParameters_.visualization.displayImages &&
         !vioParameters_.visualization.publishDebugImages) {
       cv::Mat gray;
       if (histogram_equalized_image.channels() == 1) {
@@ -267,13 +277,31 @@ void Subscriber::imageCallback(const sensor_msgs::msg::Image::ConstSharedPtr msg
   // the warning becomes more and more frequent all the time as okvis proceeds.
   // The optional pre-histogram image is retained only on the opt-in diagnostic
   // path and is collapsed to one byte per surviving keypoint after description.
-  const cv::Mat preHistogramDiagnosticImage = driftDiagnosticsOptIn() ? filtered : cv::Mat();
-  if (!vioInterface_->addImage(
-          t, cameraIndex, histogram_equalized_image, nullptr, nullptr, preHistogramDiagnosticImage)) {
+  const cv::Mat preHistogramDiagnosticImage = driftDiagnosticsEnabled_ ? filtered : cv::Mat();
+  const bool addedWithoutInputLoss = vioInterface_->addImage(
+      t, cameraIndex, histogram_equalized_image, nullptr, nullptr, preHistogramDiagnosticImage);
+  if (!addedWithoutInputLoss) {
+    if (driftDiagnosticsEnabled_) {
+      OKVIS_ASSERT_TRUE(Exception, cameraIndex < imageInputLossCounts_.size(),
+                        "Camera input-loss counter index out of range");
+      imageInputLossCounts_[cameraIndex]->fetch_add(1, std::memory_order_relaxed);
+    }
     // addImage(false) is deliberately reported neutrally: it can mean that this
     // image was rejected as stale or that an older queued image was evicted.
     LOG(WARNING) << "VIO camera input loss at t=" << t
                  << ": current image rejected or an older queued image evicted.";
+  }
+  if (emitImageDiagnostic && driftDiagnosticsEnabled_) {
+    OKVIS_ASSERT_TRUE(Exception, cameraIndex < imageInputLossCounts_.size(),
+                      "Camera input-loss counter index out of range");
+    const uint64_t inputLossEvents =
+        imageInputLossCounts_[cameraIndex]->load(std::memory_order_relaxed);
+    const double callbackMilliseconds =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - callbackStart).count();
+    LOG(INFO) << std::setprecision(17) << "[IMAGE_CALLBACK_DIAGNOSTIC] timestamp=" << t.toSec()
+              << " camera=" << cameraIndex << " callback_ms=" << callbackMilliseconds
+              << " input_loss_events=" << inputLossEvents
+              << " add_image_false=" << !addedWithoutInputLoss;
   }
 }
 
