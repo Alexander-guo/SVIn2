@@ -18,10 +18,12 @@ add_library(${PROJECT_NAME}
   src/ProbabilisticStereoTriangulator.cpp
   src/FrameNoncentralAbsoluteAdapter.cpp
   src/FrameRelativeAdapter.cpp
+  src/SpatialKeypointBalancer.cpp
   include/okvis/Frontend.hpp
   include/okvis/VioKeyframeWindowMatchingAlgorithm.hpp
   include/okvis/triangulation/stereo_triangulation.hpp
   include/okvis/triangulation/ProbabilisticStereoTriangulator.hpp
+  include/okvis/SpatialKeypointBalancer.hpp
   include/opengv/absolute_pose/FrameNoncentralAbsoluteAdapter.hpp
   include/opengv/relative_pose/FrameRelativeAdapter.hpp
   include/opengv/sac_problems/absolute_pose/FrameAbsolutePoseSacProblem.hpp
@@ -60,6 +62,7 @@ if(BUILD_TESTS)
     test/TestDeferredBearingTracks.cpp
     test/TestDeterministicFeatureProduction.cpp
     test/TestDeterministicOpenGVRansac.cpp
+    test/TestSpatialKeypointBalancer.cpp
     test/TestStereoTriangulation.cpp
   )
   target_link_libraries(${PROJECT_TEST_NAME}

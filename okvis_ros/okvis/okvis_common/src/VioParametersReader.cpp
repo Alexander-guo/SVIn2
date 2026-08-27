@@ -155,6 +155,38 @@ void VioParametersReader::readConfigFile(const std::string& filename) {
   file["detection_options"]["maxNoKeypoints"] >> vioParameters_.optimization.maxNoKeypoints;
   OKVIS_ASSERT_TRUE(Exception, vioParameters_.optimization.maxNoKeypoints >= 0, "Invalid parameter value.");
 
+  const cv::FileNode spatialBalancing = file["detection_options"]["spatialBalancing"];
+  if (!spatialBalancing.empty()) {
+    SpatialBalancingParams& balancing = vioParameters_.optimization.spatialBalancing;
+    if (!spatialBalancing["enable"].empty()) {
+      success = parseBoolean(spatialBalancing["enable"], balancing.enable);
+      OKVIS_ASSERT_TRUE(Exception, success, "Invalid spatialBalancing.enable value.");
+    }
+    if (!spatialBalancing["rows"].empty()) spatialBalancing["rows"] >> balancing.rows;
+    if (!spatialBalancing["cols"].empty()) spatialBalancing["cols"] >> balancing.cols;
+    if (!spatialBalancing["candidateMultiplier"].empty()) {
+      spatialBalancing["candidateMultiplier"] >> balancing.candidateMultiplier;
+    }
+    if (!spatialBalancing["minimumPerValidCell"].empty()) {
+      spatialBalancing["minimumPerValidCell"] >> balancing.minimumPerValidCell;
+    }
+    if (!spatialBalancing["localPaddingPixels"].empty()) {
+      spatialBalancing["localPaddingPixels"] >> balancing.localPaddingPixels;
+    }
+    OKVIS_ASSERT_TRUE(Exception, balancing.rows > 0 && balancing.cols > 0,
+                      "Spatial balancing grid dimensions must be positive.");
+    OKVIS_ASSERT_TRUE(Exception, balancing.candidateMultiplier >= 1,
+                      "Spatial balancing candidateMultiplier must be at least one.");
+    OKVIS_ASSERT_TRUE(Exception, balancing.minimumPerValidCell >= 0,
+                      "Spatial balancing minimumPerValidCell must not be negative.");
+    OKVIS_ASSERT_TRUE(Exception, balancing.localPaddingPixels >= 0,
+                      "Spatial balancing localPaddingPixels must not be negative.");
+    OKVIS_ASSERT_TRUE(Exception,
+                      static_cast<int64_t>(balancing.rows) * balancing.cols * balancing.minimumPerValidCell <=
+                          vioParameters_.optimization.maxNoKeypoints,
+                      "Spatial balancing per-cell reserves exceed maxNoKeypoints.");
+  }
+
   // image delay
   success = file["imageDelay"].isReal();
   OKVIS_ASSERT_TRUE(Exception, success, "'imageDelay' parameter missing in configuration file.");

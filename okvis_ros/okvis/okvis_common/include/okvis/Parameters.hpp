@@ -70,9 +70,19 @@ struct MiscParams {
 enum HistogramMethod { NONE, HISTOGRAM, CLAHE };
 // Sharmin: Read from config file.
 struct HistogramParams {
-  HistogramMethod histogramMethod;
-  double claheClipLimit;
-  int claheTilesGridSize;
+  HistogramMethod histogramMethod = NONE;
+  double claheClipLimit = 5.0;
+  int claheTilesGridSize = 8;
+};
+
+/// Optional deterministic redistribution of detector candidates over the image.
+struct SpatialBalancingParams {
+  bool enable = false;
+  int rows = 4;
+  int cols = 4;
+  int candidateMultiplier = 3;
+  int minimumPerValidCell = 20;
+  int localPaddingPixels = 32;
 };
 
 /// \brief Struct to define the behavior of the camera extrinsics.
@@ -288,6 +298,7 @@ struct Optimization {
   bool useMedianFilter;                        ///< Use a Median filter over captured image?
   int detectionOctaves;                        ///< Number of keypoint detection octaves.
   int maxNoKeypoints;  ///< Restrict to a maximum of this many keypoints per image (strongest ones).
+  SpatialBalancingParams spatialBalancing;  ///< Optional valid-area-aware spatial keypoint redistribution.
   int numKeyframes;    ///< Number of keyframes.
   int numImuFrames;    ///< Number of IMU frames.
   int numSonarFrames;  ///< Number of Sonar frames @Sharmin

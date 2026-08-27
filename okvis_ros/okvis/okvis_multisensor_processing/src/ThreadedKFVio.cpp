@@ -193,6 +193,8 @@ void ThreadedKFVio::init() {
   frontend_.setBriskDetectionThreshold(parameters_.optimization.detectionThreshold);
   frontend_.setBriskDetectionAbsoluteThreshold(parameters_.optimization.detectionAbsoluteThreshold);
   frontend_.setBriskDetectionMaximumKeypoints(parameters_.optimization.maxNoKeypoints);
+  frontend_.setSpatialBalancingParameters(parameters_.optimization.spatialBalancing);
+  frontend_.setImagePreprocessingTileGridSize(parameters_.histogramParams.claheTilesGridSize);
 
   lastOptimizedStateTimestamp_ =
       okvis::Time(0.0) +

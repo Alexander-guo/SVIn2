@@ -37,6 +37,20 @@ okvis::VioParameters readParameters(const std::string& path) {
   return parameters;
 }
 
+void copyWithoutSpatialBalancing(std::istream& input, std::ostream& output) {
+  std::string line;
+  bool skippingSpatialBlock = false;
+  while (std::getline(input, line)) {
+    if (line == "    spatialBalancing:") {
+      skippingSpatialBlock = true;
+      continue;
+    }
+    if (skippingSpatialBlock && line.rfind("        ", 0) == 0) continue;
+    if (skippingSpatialBlock && !line.empty()) skippingSpatialBlock = false;
+    output << line << '\n';
+  }
+}
+
 }  // namespace
 
 TEST(DetectionParameters, ReadsExplicitBriskAbsoluteThreshold) {
@@ -84,4 +98,61 @@ TEST(DetectionParameters, UsesHistoricalDefaultWhenAbsoluteThresholdIsOmitted) {
   output.close();
   const okvis::VioParameters parameters = readParameters(temporary.path());
   EXPECT_DOUBLE_EQ(parameters.optimization.detectionAbsoluteThreshold, 800.0);
+}
+
+TEST(DetectionParameters, UsesSpatialBalancingDefaultsWhenBlockIsOmitted) {
+  std::ifstream input(OKVIS_TEST_X5_CONFIG);
+  ASSERT_TRUE(input.good());
+  TemporaryConfig temporary;
+  std::ofstream output(temporary.path());
+  ASSERT_TRUE(output.good());
+  copyWithoutSpatialBalancing(input, output);
+  output.close();
+
+  const okvis::VioParameters vioParameters = readParameters(temporary.path());
+  const okvis::SpatialBalancingParams& parameters = vioParameters.optimization.spatialBalancing;
+  EXPECT_FALSE(parameters.enable);
+  EXPECT_EQ(parameters.rows, 4);
+  EXPECT_EQ(parameters.cols, 4);
+  EXPECT_EQ(parameters.candidateMultiplier, 3);
+  EXPECT_EQ(parameters.minimumPerValidCell, 20);
+  EXPECT_EQ(parameters.localPaddingPixels, 32);
+}
+
+TEST(DetectionParameters, ReadsEnabledSpatialBalancingAndLocalPadding) {
+  std::ifstream input(OKVIS_TEST_X5_CONFIG);
+  ASSERT_TRUE(input.good());
+  TemporaryConfig temporary;
+  std::ofstream output(temporary.path());
+  ASSERT_TRUE(output.good());
+  std::string line;
+  bool skippingSpatialBlock = false;
+  while (std::getline(input, line)) {
+    if (line == "    spatialBalancing:") {
+      skippingSpatialBlock = true;
+      continue;
+    }
+    if (skippingSpatialBlock && line.rfind("        ", 0) == 0) continue;
+    skippingSpatialBlock = false;
+    output << line << '\n';
+    if (line.find("maxNoKeypoints:") != std::string::npos) {
+      output << "    spatialBalancing:\n"
+             << "        enable: true\n"
+             << "        rows: 2\n"
+             << "        cols: 3\n"
+             << "        candidateMultiplier: 4\n"
+             << "        minimumPerValidCell: 12\n"
+             << "        localPaddingPixels: 48\n";
+    }
+  }
+  output.close();
+
+  const okvis::VioParameters vioParameters = readParameters(temporary.path());
+  const okvis::SpatialBalancingParams& parameters = vioParameters.optimization.spatialBalancing;
+  EXPECT_TRUE(parameters.enable);
+  EXPECT_EQ(parameters.rows, 2);
+  EXPECT_EQ(parameters.cols, 3);
+  EXPECT_EQ(parameters.candidateMultiplier, 4);
+  EXPECT_EQ(parameters.minimumPerValidCell, 12);
+  EXPECT_EQ(parameters.localPaddingPixels, 48);
 }

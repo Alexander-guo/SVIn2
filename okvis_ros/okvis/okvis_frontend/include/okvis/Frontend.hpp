@@ -45,6 +45,7 @@
 #include <mutex>
 #include <okvis/DenseMatcher.hpp>
 #include <okvis/Estimator.hpp>
+#include <okvis/SpatialKeypointBalancer.hpp>
 #include <okvis/VioFrontendInterface.hpp>
 #include <okvis/assert_macros.hpp>
 #include <okvis/timing/Timer.hpp>
@@ -203,6 +204,15 @@ class Frontend : public VioFrontendInterface {
     initialiseBriskFeatureDetectors();
   }
 
+  /// Enable or configure deterministic spatial redistribution before description.
+  void setSpatialBalancingParameters(const SpatialBalancingParams& parameters) {
+    spatialBalancingParameters_ = parameters;
+    initialiseBriskFeatureDetectors();
+  }
+
+  /// Set the preprocessing tile grid used only for boundary-density diagnostics.
+  void setImagePreprocessingTileGridSize(int tileGridSize) { imagePreprocessingTileGridSize_ = tileGridSize; }
+
   /// @}
   /// @name Setters related to the BRISK descriptor
   /// @{
@@ -272,6 +282,9 @@ class Frontend : public VioFrontendInterface {
   double briskDetectionThreshold_;          ///< The set BRISK detection threshold.
   double briskDetectionAbsoluteThreshold_;  ///< The set BRISK absolute detection threshold.
   size_t briskDetectionMaximumKeypoints_;   ///< The set maximum number of keypoints.
+  SpatialBalancingParams spatialBalancingParameters_;
+  int imagePreprocessingTileGridSize_ = 8;
+  std::vector<int64_t> lastFeatureDiagnosticSecond_;
 
   /// @}
   /// @name BRISK descriptor extractor parameters

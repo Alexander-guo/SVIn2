@@ -51,13 +51,21 @@
 
 // cameras and distortions
 #include <algorithm>
+#include <cstdlib>
+#include <cstring>
+#include <iomanip>
+#include <limits>
+#include <map>
 #include <memory>
+#include <numeric>
+#include <set>
 #include <okvis/cameras/EquidistantDistortion.hpp>
 #include <okvis/cameras/DoubleSphereCamera.hpp>
 #include <okvis/cameras/NoDistortion.hpp>
 #include <okvis/cameras/PinholeCamera.hpp>
 #include <okvis/cameras/RadialTangentialDistortion.hpp>
 #include <okvis/cameras/RadialTangentialDistortion8.hpp>
+#include <sstream>
 #include <vector>
 // Kneip RANSAC
 #include <opengv/sac/Ransac.hpp>
@@ -68,6 +76,23 @@
 /// \brief okvis Main namespace of this package.
 namespace okvis {
 
+namespace {
+bool featureDistributionDiagnosticsOptIn() {
+  const char* value = std::getenv("SVIN2_ENABLE_DRIFT_DIAGNOSTICS");
+  return value != nullptr && std::strcmp(value, "1") == 0;
+}
+
+std::string spatialCounts(const std::vector<size_t>& values) {
+  std::ostringstream stream;
+  for (size_t index = 0; index < values.size(); ++index) {
+    if (index > 0) stream << ',';
+    stream << values[index];
+  }
+  return stream.str();
+}
+
+}  // namespace
+
 // Constructor.
 Frontend::Frontend(size_t numCameras)
     : isInitialized_(false),
@@ -76,6 +101,7 @@ Frontend::Frontend(size_t numCameras)
       briskDetectionThreshold_(50.0),
       briskDetectionAbsoluteThreshold_(800.0),
       briskDetectionMaximumKeypoints_(450),
+      lastFeatureDiagnosticSecond_(numCameras, std::numeric_limits<int64_t>::min()),
       briskDescriptionRotationInvariance_(true),
       briskDescriptionScaleInvariance_(false),
       briskMatchingThreshold_(60.0),
@@ -103,12 +129,75 @@ bool Frontend::detectAndDescribe(size_t cameraIndex,
   frameOut->setDetector(cameraIndex, featureDetectors_[cameraIndex]);
   frameOut->setExtractor(cameraIndex, descriptorExtractors_[cameraIndex]);
 
-  frameOut->detect(cameraIndex);
+  bool diagnosticsEnabled = false;
+  if (featureDistributionDiagnosticsOptIn()) {
+    const int64_t diagnosticSecond = static_cast<int64_t>(std::floor(frameOut->timestamp().toSec()));
+    diagnosticsEnabled = lastFeatureDiagnosticSecond_[cameraIndex] != diagnosticSecond;
+    if (diagnosticsEnabled) lastFeatureDiagnosticSecond_[cameraIndex] = diagnosticSecond;
+  }
+  SpatialKeypointBalanceResult spatialResult;
+  if (spatialBalancingParameters_.enable) {
+    spatialResult = detectAndBalanceSpatialKeypoints(frameOut->image(cameraIndex),
+                                                     *featureDetectors_[cameraIndex],
+                                                     frameOut->geometry(cameraIndex),
+                                                     briskDetectionMaximumKeypoints_,
+                                                     spatialBalancingParameters_);
+    frameOut->resetKeypoints(cameraIndex, spatialResult.keypoints);
+  } else {
+    frameOut->detect(cameraIndex);
+  }
+
+  std::vector<cv::KeyPoint> selectedKeypoints;
+  if (diagnosticsEnabled) {
+    selectedKeypoints.reserve(frameOut->numKeypoints(cameraIndex));
+    for (size_t index = 0; index < frameOut->numKeypoints(cameraIndex); ++index) {
+      cv::KeyPoint keypoint;
+      frameOut->getCvKeypoint(cameraIndex, index, keypoint);
+      selectedKeypoints.push_back(keypoint);
+    }
+  }
 
   // ExtractionDirection == gravity direction in camera frame
   Eigen::Vector3d g_in_W(0, 0, -1);
   Eigen::Vector3d extractionDirection = T_WC.inverse().C() * g_in_W;
   frameOut->describe(cameraIndex, extractionDirection);
+
+  if (diagnosticsEnabled) {
+    std::vector<cv::KeyPoint> describedKeypoints;
+    describedKeypoints.reserve(frameOut->numKeypoints(cameraIndex));
+    for (size_t index = 0; index < frameOut->numKeypoints(cameraIndex); ++index) {
+      cv::KeyPoint keypoint;
+      frameOut->getCvKeypoint(cameraIndex, index, keypoint);
+      describedKeypoints.push_back(keypoint);
+    }
+    const cv::Size imageSize = frameOut->image(cameraIndex).size();
+    const std::vector<size_t> selectedCellCounts = countSpatialKeypoints(selectedKeypoints, imageSize);
+    const std::vector<size_t> describedCellCounts = countSpatialKeypoints(describedKeypoints, imageSize);
+    const std::vector<size_t> rawCellCounts = spatialBalancingParameters_.enable
+                                                  ? spatialResult.rawDetectionsPerCell
+                                                  : selectedCellCounts;
+    const std::vector<size_t> candidateCellCounts = spatialBalancingParameters_.enable
+                                                        ? spatialResult.candidatesPerCell
+                                                        : selectedCellCounts;
+    const size_t rawCount = std::accumulate(rawCellCounts.begin(), rawCellCounts.end(), size_t{0});
+    const size_t candidateCount =
+        std::accumulate(candidateCellCounts.begin(), candidateCellCounts.end(), size_t{0});
+    LOG(INFO) << std::setprecision(17) << "[FEATURE_DISTRIBUTION_DIAGNOSTIC]"
+              << " timestamp=" << frameOut->timestamp().toSec() << " frame=" << frameOut->id()
+              << " camera=" << cameraIndex << " balancing=" << spatialBalancingParameters_.enable
+              << " raw_detection_count=" << rawCount << " valid_candidate_count=" << candidateCount
+              << " selected_count=" << selectedKeypoints.size()
+              << " described_count=" << describedKeypoints.size()
+              << " invalid_count=" << spatialResult.invalidCandidates
+              << " raw_detection_cells=" << spatialCounts(rawCellCounts)
+              << " valid_candidate_cells=" << spatialCounts(candidateCellCounts)
+              << " selected_cells=" << spatialCounts(selectedCellCounts)
+              << " described_cells=" << spatialCounts(describedCellCounts)
+              << " boundary_density_ratio="
+              << keypointBoundaryDensityRatio(describedKeypoints,
+                                               imageSize,
+                                               imagePreprocessingTileGridSize_);
+  }
 
   // set detector/extractor to nullpointer? TODO(later) or not?
   return true;
@@ -1098,22 +1187,30 @@ void Frontend::initialiseBriskFeatureDetectors() {
   }
   featureDetectors_.clear();
   descriptorExtractors_.clear();
+  size_t detectorMaximumKeypoints = briskDetectionMaximumKeypoints_;
+  if (spatialBalancingParameters_.enable) {
+    const size_t multiplier = static_cast<size_t>(std::max(1, spatialBalancingParameters_.candidateMultiplier));
+    if (detectorMaximumKeypoints <= std::numeric_limits<size_t>::max() / multiplier) {
+      detectorMaximumKeypoints *= multiplier;
+    }
+  }
   for (size_t i = 0; i < numCameras_; ++i) {
     featureDetectors_.push_back(std::shared_ptr<cv::FeatureDetector>(
 #ifdef __ARM_NEON__
         new cv::GridAdaptedFeatureDetector(new cv::FastFeatureDetector(briskDetectionThreshold_),
-                                           briskDetectionMaximumKeypoints_,
+                                           detectorMaximumKeypoints,
                                            7,
                                            4)));  // from config file, except the 7x4...
 #else
         new brisk::ScaleSpaceFeatureDetector<brisk::HarrisScoreCalculator>(briskDetectionThreshold_,
                                                                            briskDetectionOctaves_,
                                                                            briskDetectionAbsoluteThreshold_,
-                                                                           briskDetectionMaximumKeypoints_)));
+                                                                           detectorMaximumKeypoints)));
     std::cout << "briskDetectionThreshold_: " << briskDetectionThreshold_ << std::endl;
     std::cout << "briskDetectionOctaves_: " << briskDetectionOctaves_ << std::endl;
     std::cout << "briskDetectionAbsoluteThreshold_: " << briskDetectionAbsoluteThreshold_ << std::endl;
-    std::cout << "briskDetectionMaximumKeypoints_: " << briskDetectionMaximumKeypoints_ << std::endl;
+    std::cout << "briskDetectionMaximumKeypoints_: " << briskDetectionMaximumKeypoints_
+              << " (candidate cap " << detectorMaximumKeypoints << ")" << std::endl;
 #endif
     descriptorExtractors_.push_back(std::shared_ptr<cv::DescriptorExtractor>(
         new brisk::BriskDescriptorExtractor(briskDescriptionRotationInvariance_, briskDescriptionScaleInvariance_)));
