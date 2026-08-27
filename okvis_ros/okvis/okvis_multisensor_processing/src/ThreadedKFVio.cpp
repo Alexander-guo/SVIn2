@@ -56,6 +56,7 @@
 #include <okvis/cameras/PinholeCamera.hpp>               // Sharmin
 #include <okvis/cameras/RadialTangentialDistortion.hpp>  // Sharmin
 #include <okvis/ceres/ImuError.hpp>
+#include <okvis/triangulation/ProbabilisticStereoTriangulator.hpp>
 #include <utility>
 #include <vector>
 /// @Sharmin
@@ -95,9 +96,16 @@ static const okvis::Duration temporal_imu_data_overlap(
     0.02);  // overlap of imu data before and after two consecutive frames [seconds]
 
 namespace {
-bool driftDiagnosticsOptIn() {
+bool driftDiagnosticsOptIn(bool configuredDefault = false) {
   const char* value = std::getenv("SVIN2_ENABLE_DRIFT_DIAGNOSTICS");
-  return value != nullptr && std::strcmp(value, "1") == 0;
+  return value == nullptr ? configuredDefault : std::strcmp(value, "1") == 0;
+}
+
+bool imuWindowDiagnosticsOptIn(bool configuredDefault) {
+  const char* value = std::getenv("SVIN2_ENABLE_IMU_WINDOW_DIAGNOSTICS");
+  if (value != nullptr) return std::strcmp(value, "1") == 0;
+  value = std::getenv("SVIN2_ENABLE_DRIFT_DIAGNOSTICS");
+  return value == nullptr ? configuredDefault : std::strcmp(value, "1") == 0;
 }
 
 double quaternionDistanceDegrees(const Eigen::Quaterniond& lhs, const Eigen::Quaterniond& rhs) {
@@ -195,6 +203,13 @@ void ThreadedKFVio::init() {
   frontend_.setBriskDetectionMaximumKeypoints(parameters_.optimization.maxNoKeypoints);
   frontend_.setSpatialBalancingParameters(parameters_.optimization.spatialBalancing);
   frontend_.setImagePreprocessingTileGridSize(parameters_.histogramParams.claheTilesGridSize);
+  okvis::triangulation::setTriangulationDiagnosticsEnabled(parameters_.diagnostics.triangulation);
+#ifndef USE_MOCK
+  frontend_.setMatcherThreads(static_cast<size_t>(parameters_.threading.matcherThreads));
+  estimator_.setFiniteLandmarkRetentionEnabled(parameters_.optimization.finiteLandmarkRetention);
+  estimator_.setRetentionDiagnosticsEnabled(parameters_.diagnostics.retention);
+  okvis::ceres::setReprojectionDiagnosticsEnabled(parameters_.diagnostics.reprojection);
+#endif
 
   lastOptimizedStateTimestamp_ =
       okvis::Time(0.0) +
@@ -818,7 +833,7 @@ void ThreadedKFVio::matchingLoop() {
     // no measurements in timeframe, should not happen, as we waited for measurements
     if (imuData.size() == 0) continue;
 
-    if (parameters_.visualization.displayImages || debugImgCallback_ || driftDiagnosticsOptIn()) {
+    if (imuWindowDiagnosticsOptIn(parameters_.diagnostics.imuWindow)) {
       double maximumGap = 0.0;
       for (size_t index = 1; index < imuData.size(); ++index) {
         maximumGap = std::max(maximumGap, (imuData[index].timeStamp - imuData[index - 1].timeStamp).toSec());
@@ -1248,8 +1263,9 @@ void ThreadedKFVio::optimizationLoop() {
     OptimizationResults result;
     {
       std::lock_guard<std::mutex> l(estimator_mutex_);
+      const bool driftDiagnosticsRequested = driftDiagnosticsOptIn(parameters_.diagnostics.drift);
       const bool driftDiagnosticsEnabled = parameters_.visualization.displayImages || debugImgCallback_ ||
-                                           driftDiagnosticsOptIn();
+                                           driftDiagnosticsRequested;
       okvis::kinematics::Transformation preOptimizationT_WS;
       okvis::SpeedAndBias preOptimizationSpeedAndBias = okvis::SpeedAndBias::Zero();
       okvis::kinematics::Transformation previousOptimizedT_WS;
@@ -1300,8 +1316,8 @@ void ThreadedKFVio::optimizationLoop() {
       }
       optimizationTimer.start();
       // if(frontend_.isInitialized()){
-      //TODO(GUO): make this num of threads for optimization configurable
-      estimator_.optimize(parameters_.optimization.max_iterations, 2, false);
+      estimator_.optimize(parameters_.optimization.max_iterations,
+                          static_cast<size_t>(parameters_.threading.estimatorThreads), false);
       //}
       /*if (estimator_.numFrames() > 0 && !frontend_.isInitialized()){
         // undo translation
@@ -1325,7 +1341,7 @@ void ThreadedKFVio::optimizationLoop() {
       const size_t preMarginalizationLandmarks = estimator_.numLandmarks();
       std::map<uint64_t, size_t> preMarginalizationCohort;
       std::array<size_t, 3> preMarginalizationCohortCounts{};
-      if (driftDiagnosticsOptIn()) {
+      if (driftDiagnosticsRequested) {
         okvis::MapPointVector preLandmarks;
         estimator_.getLandmarks(preLandmarks);
         for (const okvis::MapPoint& landmark : preLandmarks) {
@@ -1359,7 +1375,7 @@ void ThreadedKFVio::optimizationLoop() {
       estimator_.applyMarginalizationStrategy(
           parameters_.optimization.numKeyframes, parameters_.optimization.numImuFrames, result.transferredLandmarks);
       marginalizationTimer.stop();
-      if (driftDiagnosticsOptIn()) {
+      if (driftDiagnosticsRequested) {
         std::array<size_t, 3> removedCohortCounts{};
         std::array<size_t, 3> removedFiniteCohortCounts{};
         struct RemovedLandmarkSample {
@@ -1557,7 +1573,7 @@ void ThreadedKFVio::optimizationLoop() {
         //*********** End Added by Sharmin *******//
       }
 
-      if (parameters_.visualization.displayImages || debugImgCallback_ || driftDiagnosticsOptIn()) {
+      if (parameters_.visualization.displayImages || debugImgCallback_ || driftDiagnosticsRequested) {
         // fill in information that requires access to estimator.
         visualizationDataPtr = std::make_shared<VioVisualizer::VisualizationData>();
         VioVisualizer::VisualizationData::DriftDiagnostics& drift = visualizationDataPtr->drift;
@@ -1615,7 +1631,7 @@ void ThreadedKFVio::optimizationLoop() {
         drift.cameraUninitialized.assign(frame_pairs->numFrames(), 0);
         drift.cameraInvalidInitialized.assign(frame_pairs->numFrames(), 0);
         drift.cameraFiniteCoverageCells.assign(frame_pairs->numFrames(), 0);
-        const bool cellDiagnosticsEnabled = driftDiagnosticsOptIn();
+        const bool cellDiagnosticsEnabled = driftDiagnosticsRequested;
         if (cellDiagnosticsEnabled) {
           drift.cameraCellKeypoints.assign(frame_pairs->numFrames() * 16, 0);
           drift.cameraCellTracked.assign(frame_pairs->numFrames() * 16, 0);
@@ -2004,12 +2020,14 @@ void ThreadedKFVio::optimizationLoop() {
         else driftDiagnosticEventActive = true;
         const bool inBurst = driftDiagnosticBurstRemaining > 0;
         if (inBurst) --driftDiagnosticBurstRemaining;
-        driftDiagnosticShouldEmit = inBurst || driftDiagnosticFrameCounter % baselinePeriod == 0;
+        driftDiagnosticShouldEmit = driftDiagnosticsRequested &&
+                                    (inBurst || driftDiagnosticFrameCounter % baselinePeriod == 0);
         previousFiniteSupport = drift.finite;
         if (driftDiagnosticShouldEmit) populateGeometryDiagnostics();
 
-        std::ostringstream diagnostic;
-        diagnostic << std::setprecision(17) << "[ESTIMATOR_DRIFT_DIAGNOSTIC]"
+        if (driftDiagnosticShouldEmit) {
+          std::ostringstream diagnostic;
+          diagnostic << std::setprecision(17) << "[ESTIMATOR_DRIFT_DIAGNOSTIC]"
                    << " timestamp=" << drift.timestamp << " relative_timestamp=" << drift.relativeTimestamp
                    << " frame=" << drift.frameId
                    << " keyframe=" << drift.isKeyframe << " dt=" << drift.deltaTime
@@ -2118,7 +2136,8 @@ void ThreadedKFVio::optimizationLoop() {
                    << " opt_termination=" << drift.optimizationTerminationType
                    << " opt_usable=" << drift.optimizationUsable
                    << " opt_time_s=" << drift.optimizationTimeSeconds;
-        driftDiagnosticLine = diagnostic.str();
+          driftDiagnosticLine = diagnostic.str();
+        }
       }
 
       optimizationDone_ = true;

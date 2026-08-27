@@ -37,6 +37,8 @@
  */
 
 #include <atomic>
+#include <cstdlib>
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <glog/logging.h>
@@ -48,6 +50,21 @@
 namespace okvis {
 /// \brief ceres Namespace for ceres-related functionality implemented in okvis.
 namespace ceres {
+
+inline std::atomic<bool>& reprojectionDiagnosticsConfiguredDefault() {
+  static std::atomic<bool> enabled{false};
+  return enabled;
+}
+
+inline void setReprojectionDiagnosticsEnabled(bool enabled) {
+  reprojectionDiagnosticsConfiguredDefault().store(enabled, std::memory_order_relaxed);
+}
+
+inline bool reprojectionDiagnosticsOptIn() {
+  const char* value = std::getenv("SVIN2_ENABLE_REPROJECTION_DIAGNOSTICS");
+  if (value != nullptr) return std::strcmp(value, "1") == 0;
+  return reprojectionDiagnosticsConfiguredDefault().load(std::memory_order_relaxed);
+}
 
 // Default constructor.
 template <class GEOMETRY_T>
@@ -181,49 +198,51 @@ bool ReprojectionError<GEOMETRY_T>::EvaluateWithMinimalJacobians(double const* c
   if (projectionStatus != cameras::CameraBase::ProjectionStatus::Successful || !reprojectionFinite ||
       !jacobianFinite) {
     updateEvaluationState(EvaluationState::Deactivated);
-    static std::atomic<uint64_t> warningCount{0};
-    const uint64_t count = warningCount.fetch_add(1, std::memory_order_relaxed) + 1;
-    if (count <= 20 || count % 10000 == 0) {
-      const char* projectionStatusName = "Unknown";
-      switch (projectionStatus) {
-        case cameras::CameraBase::ProjectionStatus::Successful:
-          projectionStatusName = "Successful";
-          break;
-        case cameras::CameraBase::ProjectionStatus::OutsideImage:
-          projectionStatusName = "OutsideImage";
-          break;
-        case cameras::CameraBase::ProjectionStatus::Masked:
-          projectionStatusName = "Masked";
-          break;
-        case cameras::CameraBase::ProjectionStatus::Behind:
-          projectionStatusName = "Behind";
-          break;
-        case cameras::CameraBase::ProjectionStatus::Invalid:
-          projectionStatusName = "Invalid";
-          break;
+    if (reprojectionDiagnosticsOptIn()) {
+      static std::atomic<uint64_t> warningCount{0};
+      const uint64_t count = warningCount.fetch_add(1, std::memory_order_relaxed) + 1;
+      if (count <= 20 || count % 10000 == 0) {
+        const char* projectionStatusName = "Unknown";
+        switch (projectionStatus) {
+          case cameras::CameraBase::ProjectionStatus::Successful:
+            projectionStatusName = "Successful";
+            break;
+          case cameras::CameraBase::ProjectionStatus::OutsideImage:
+            projectionStatusName = "OutsideImage";
+            break;
+          case cameras::CameraBase::ProjectionStatus::Masked:
+            projectionStatusName = "Masked";
+            break;
+          case cameras::CameraBase::ProjectionStatus::Behind:
+            projectionStatusName = "Behind";
+            break;
+          case cameras::CameraBase::ProjectionStatus::Invalid:
+            projectionStatusName = "Invalid";
+            break;
+        }
+        Eigen::VectorXd intrinsics;
+        cameraGeometry_->getIntrinsics(intrinsics);
+        Eigen::Vector3d projectionPoint = hp_C.head<3>();
+        if (hp_C[3] < 0.0) {
+          projectionPoint = -projectionPoint;
+        }
+        LOG(WARNING) << "[REPROJECTION_DIAGNOSTIC] event=" << count << " landmark_id=" << landmarkId_
+                     << " frame_id=" << frameId_ << " camera_id=" << cameraId()
+                     << " keypoint_id=" << keypointId_ << " status=" << projectionStatusName
+                     << " image=" << cameraGeometry_->imageWidth() << "x" << cameraGeometry_->imageHeight()
+                     << " reprojection_finite=" << reprojectionFinite
+                     << " jacobian_requested=" << (jacobians != NULL) << " jacobian_finite=" << jacobianFinite
+                     << " active_factors=" << activeFactorCount()
+                     << " deactivated_factors=" << deactivatedFactorCount()
+                     << "\n  intrinsics=" << intrinsics.transpose()
+                     << "\n  measurement=" << measurement_.transpose() << " prediction=" << kp.transpose()
+                     << "\n  hp_W=" << hp_W.transpose() << " hp_S=" << hp_S.transpose()
+                     << " hp_C=" << hp_C.transpose() << " projection_point=" << projectionPoint.transpose()
+                     << "\n  t_WS_W=" << t_WS_W.transpose() << " q_WS_xyzw=" << q_WS.coeffs().transpose()
+                     << " q_WS_norm=" << q_WS.norm() << "\n  t_SC_S=" << t_SC_S.transpose()
+                     << " q_SC_xyzw=" << q_SC.coeffs().transpose() << " q_SC_norm=" << q_SC.norm()
+                     << "\n  sqrt_information=\n" << squareRootInformation_ << "\n  Jh=\n" << Jh;
       }
-      Eigen::VectorXd intrinsics;
-      cameraGeometry_->getIntrinsics(intrinsics);
-      Eigen::Vector3d projectionPoint = hp_C.head<3>();
-      if (hp_C[3] < 0.0) {
-        projectionPoint = -projectionPoint;
-      }
-      LOG(WARNING) << "[REPROJECTION_DIAGNOSTIC] event=" << count << " landmark_id=" << landmarkId_
-                   << " frame_id=" << frameId_ << " camera_id=" << cameraId() << " keypoint_id=" << keypointId_
-                   << " status=" << projectionStatusName << " image=" << cameraGeometry_->imageWidth() << "x"
-                   << cameraGeometry_->imageHeight() << " reprojection_finite=" << reprojectionFinite
-                   << " jacobian_requested=" << (jacobians != NULL) << " jacobian_finite=" << jacobianFinite
-                   << " active_factors=" << activeFactorCount()
-                   << " deactivated_factors=" << deactivatedFactorCount()
-                   << "\n  intrinsics=" << intrinsics.transpose() << "\n  measurement=" << measurement_.transpose()
-                   << " prediction=" << kp.transpose() << "\n  hp_W=" << hp_W.transpose() << " hp_S=" << hp_S.transpose()
-                   << " hp_C=" << hp_C.transpose()
-                   << " projection_point=" << projectionPoint.transpose() << "\n  t_WS_W=" << t_WS_W.transpose()
-                   << " q_WS_xyzw=" << q_WS.coeffs().transpose() << " q_WS_norm=" << q_WS.norm()
-                   << "\n  t_SC_S=" << t_SC_S.transpose() << " q_SC_xyzw=" << q_SC.coeffs().transpose()
-                   << " q_SC_norm=" << q_SC.norm() << "\n  sqrt_information=\n"
-                   << squareRootInformation_ << "\n  Jh=\n"
-                   << Jh;
     }
 
     residuals[0] = 0.0;

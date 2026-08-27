@@ -51,6 +51,8 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdlib>
+#include <cstring>
 #include <iomanip>
 #include <memory>
 #include <okvis/cameras/DoubleSphereCamera.hpp>
@@ -64,6 +66,15 @@
 
 /// \brief okvis Main namespace of this package.
 namespace okvis {
+
+namespace {
+bool imageDiagnosticsOptIn(bool configuredDefault) {
+  const char* value = std::getenv("SVIN2_ENABLE_IMAGE_DIAGNOSTICS");
+  if (value != nullptr) return std::strcmp(value, "1") == 0;
+  value = std::getenv("SVIN2_ENABLE_DRIFT_DIAGNOSTICS");
+  return value == nullptr ? configuredDefault : std::strcmp(value, "1") == 0;
+}
+}  // namespace
 
 VioVisualizer::VioVisualizer(okvis::VioParameters& parameters) : parameters_(parameters) {
   if (parameters.nCameraSystem.numCameras() > 0) {
@@ -239,7 +250,8 @@ cv::Mat VioVisualizer::drawMatches(VisualizationData::Ptr& data, size_t image_nu
   const size_t baselinePeriod = std::isfinite(configuredCameraRate) && configuredCameraRate >= 1.0
                                     ? static_cast<size_t>(std::llround(configuredCameraRate))
                                     : 1;
-  if (image_number < diagnosticFrameCounters_.size() &&
+  if (imageDiagnosticsOptIn(parameters_.diagnostics.image) &&
+      image_number < diagnosticFrameCounters_.size() &&
       ++diagnosticFrameCounters_[image_number] % baselinePeriod == 0) {
     LOG(INFO) << std::setprecision(17) << "[IMAGE_QUALITY_DIAGNOSTIC]"
               << " timestamp=" << data->drift.timestamp

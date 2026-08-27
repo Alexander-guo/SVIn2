@@ -48,6 +48,8 @@
 // cameras and distortions
 #include <algorithm>
 #include <atomic>
+#include <cstdlib>
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <glog/logging.h>
@@ -60,6 +62,16 @@
 /// \brief okvis Main namespace of this package.
 namespace okvis {
 namespace triangulation {
+
+namespace {
+std::atomic<bool> triangulationDiagnosticsEnabled{false};
+}  // namespace
+
+void setTriangulationDiagnosticsEnabled(bool enabled) {
+  const char* value = std::getenv("SVIN2_ENABLE_TRIANGULATION_DIAGNOSTICS");
+  triangulationDiagnosticsEnabled.store(value == nullptr ? enabled : std::strcmp(value, "1") == 0,
+                                        std::memory_order_relaxed);
+}
 
 // Default constructor; make sure to call resetFrames before triangulation!
 template <class CAMERA_GEOMETRY_T>
@@ -256,6 +268,7 @@ bool ProbabilisticStereoTriangulator<CAMERA_GEOMETRY_T>::stereoTriangulate(
   const double depthA = std::abs(hpA[3]) > 1.0e-12 ? hpA[2] / hpA[3] : hpA[2];
   const double depthB = std::abs(hpB[3]) > 1.0e-12 ? hpB[2] / hpB[3] : hpB[2];
   const auto logTriangulation = [&](const char* result, const char* reason, double errorA, double errorB) {
+    if (!triangulationDiagnosticsEnabled.load(std::memory_order_relaxed)) return;
     static std::atomic<uint64_t> diagnosticCount{0};
     const uint64_t count = diagnosticCount.fetch_add(1, std::memory_order_relaxed) + 1;
     if (count <= 20 || count % 1000000 == 0) {

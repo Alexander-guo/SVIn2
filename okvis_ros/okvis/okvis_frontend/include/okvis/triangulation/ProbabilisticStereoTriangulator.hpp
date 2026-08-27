@@ -53,6 +53,10 @@
 namespace okvis {
 namespace triangulation {
 
+/// Enable or disable detailed triangulation diagnostics for all camera models.
+/// SVIN2_ENABLE_TRIANGULATION_DIAGNOSTICS, when set, overrides this value.
+void setTriangulationDiagnosticsEnabled(bool enabled);
+
 /**
  * \brief The ProbabilisticStereoTriangulator class
  * \tparam CAMERA_GEOMETRY_T Camera geometry model. See also okvis::cameras::CameraBase.

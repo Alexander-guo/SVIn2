@@ -202,6 +202,12 @@ class Estimator : public VioBackendInterface {
                                     size_t numImuFrames,
                                     okvis::MapPointVector& removedLandmarks);  // NOLINT
 
+  /// Configure bounded finite-landmark retention before processing starts.
+  void setFiniteLandmarkRetentionEnabled(bool enabled) { finiteLandmarkRetentionEnabled_ = enabled; }
+
+  /// Configure retention policy diagnostics before processing starts.
+  void setRetentionDiagnosticsEnabled(bool enabled) { retentionDiagnosticsEnabled_ = enabled; }
+
   /**
    * @brief Initialise pose from IMU measurements. For convenience as static.
    * @param[in]  imuMeasurements The IMU measurements to be used for this.
@@ -625,6 +631,10 @@ class Estimator : public VioBackendInterface {
   // Opt-in bounded retention lifetime, keyed by landmark ID and first
   // retention timestamp.  It is intentionally independent of MapPoint data.
   std::map<uint64_t, double> retainedLandmarkFirstRetentionTime_;
+  // Bare Estimator instances preserve historical behavior; production passes
+  // the VioParameters default (enabled) during ThreadedKFVio initialization.
+  bool finiteLandmarkRetentionEnabled_ = false;
+  bool retentionDiagnosticsEnabled_ = false;
 
   // parameters
   std::vector<okvis::ExtrinsicsEstimationParameters,

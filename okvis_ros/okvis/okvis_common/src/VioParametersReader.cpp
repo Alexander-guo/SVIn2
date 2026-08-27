@@ -93,6 +93,72 @@ void VioParametersReader::readConfigFile(const std::string& filename) {
     LOG(WARNING) << "numImuFrames parameter not provided. Setting to default numImuFrames=2.";
     vioParameters_.optimization.numImuFrames = 2;
   }
+  const cv::FileNode finiteLandmarkRetention = file["finiteLandmarkRetention"];
+  if (!finiteLandmarkRetention.empty()) {
+    bool retentionEnabled = true;
+    const bool retentionValid = parseBoolean(finiteLandmarkRetention, retentionEnabled);
+    OKVIS_ASSERT_TRUE(Exception, retentionValid, "'finiteLandmarkRetention' must be boolean.");
+    vioParameters_.optimization.finiteLandmarkRetention = retentionEnabled;
+  }
+
+  const cv::FileNode threadingOptions = file["threading_options"];
+  if (!threadingOptions.empty()) {
+    if (!threadingOptions["matcherThreads"].empty()) {
+      OKVIS_ASSERT_TRUE(Exception, threadingOptions["matcherThreads"].isInt(),
+                        "'threading_options.matcherThreads' must be an integer.");
+      threadingOptions["matcherThreads"] >> vioParameters_.threading.matcherThreads;
+    }
+    if (!threadingOptions["estimatorThreads"].empty()) {
+      OKVIS_ASSERT_TRUE(Exception, threadingOptions["estimatorThreads"].isInt(),
+                        "'threading_options.estimatorThreads' must be an integer.");
+      threadingOptions["estimatorThreads"] >> vioParameters_.threading.estimatorThreads;
+    }
+  }
+  OKVIS_ASSERT_TRUE(Exception,
+                    vioParameters_.threading.matcherThreads >= 1 &&
+                        vioParameters_.threading.matcherThreads <= 255,
+                    "'threading_options.matcherThreads' must be in [1, 255].");
+  OKVIS_ASSERT_TRUE(Exception, vioParameters_.threading.estimatorThreads >= 1,
+                    "'threading_options.estimatorThreads' must be at least 1.");
+
+  const cv::FileNode diagnosticsOptions = file["diagnostics_options"];
+  if (!diagnosticsOptions.empty()) {
+    if (!diagnosticsOptions["drift"].empty()) {
+      const bool valid = parseBoolean(diagnosticsOptions["drift"], vioParameters_.diagnostics.drift);
+      OKVIS_ASSERT_TRUE(Exception, valid, "'diagnostics_options.drift' must be boolean.");
+    }
+    if (!diagnosticsOptions["retention"].empty()) {
+      const bool valid = parseBoolean(diagnosticsOptions["retention"], vioParameters_.diagnostics.retention);
+      OKVIS_ASSERT_TRUE(Exception, valid, "'diagnostics_options.retention' must be boolean.");
+    }
+    if (!diagnosticsOptions["image"].empty()) {
+      const bool valid = parseBoolean(diagnosticsOptions["image"], vioParameters_.diagnostics.image);
+      OKVIS_ASSERT_TRUE(Exception, valid, "'diagnostics_options.image' must be boolean.");
+    }
+    if (!diagnosticsOptions["imuWindow"].empty()) {
+      const bool valid = parseBoolean(diagnosticsOptions["imuWindow"], vioParameters_.diagnostics.imuWindow);
+      OKVIS_ASSERT_TRUE(Exception, valid, "'diagnostics_options.imuWindow' must be boolean.");
+    }
+    if (!diagnosticsOptions["landmarkPromotion"].empty()) {
+      const bool valid =
+          parseBoolean(diagnosticsOptions["landmarkPromotion"], vioParameters_.diagnostics.landmarkPromotion);
+      OKVIS_ASSERT_TRUE(Exception, valid, "'diagnostics_options.landmarkPromotion' must be boolean.");
+    }
+    if (!diagnosticsOptions["bearingTracking"].empty()) {
+      const bool valid =
+          parseBoolean(diagnosticsOptions["bearingTracking"], vioParameters_.diagnostics.bearingTracking);
+      OKVIS_ASSERT_TRUE(Exception, valid, "'diagnostics_options.bearingTracking' must be boolean.");
+    }
+    if (!diagnosticsOptions["triangulation"].empty()) {
+      const bool valid =
+          parseBoolean(diagnosticsOptions["triangulation"], vioParameters_.diagnostics.triangulation);
+      OKVIS_ASSERT_TRUE(Exception, valid, "'diagnostics_options.triangulation' must be boolean.");
+    }
+    if (!diagnosticsOptions["reprojection"].empty()) {
+      const bool valid = parseBoolean(diagnosticsOptions["reprojection"], vioParameters_.diagnostics.reprojection);
+      OKVIS_ASSERT_TRUE(Exception, valid, "'diagnostics_options.reprojection' must be boolean.");
+    }
+  }
   // minimum ceres iterations
   if (file["ceres_options"]["minIterations"].isInt()) {
     file["ceres_options"]["minIterations"] >> vioParameters_.optimization.min_iterations;

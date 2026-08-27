@@ -56,9 +56,11 @@
 namespace okvis {
 
 namespace {
-bool driftDiagnosticsOptIn() {
-  const char* value = std::getenv("SVIN2_ENABLE_DRIFT_DIAGNOSTICS");
-  return value != nullptr && std::strcmp(value, "1") == 0;
+bool imageDiagnosticsOptIn(bool configuredDefault) {
+  const char* value = std::getenv("SVIN2_ENABLE_IMAGE_DIAGNOSTICS");
+  if (value != nullptr) return std::strcmp(value, "1") == 0;
+  value = std::getenv("SVIN2_ENABLE_DRIFT_DIAGNOSTICS");
+  return value == nullptr ? configuredDefault : std::strcmp(value, "1") == 0;
 }
 
 }  // namespace
@@ -71,7 +73,7 @@ Subscriber::Subscriber(std::shared_ptr<rclcpp::Node> node,
     : node_(node), vioInterface_(vioInterfacePtr), imgTransport_(nullptr) {
   /// @Sharmin
   param_reader.getParameters(vioParameters_);
-  driftDiagnosticsEnabled_ = driftDiagnosticsOptIn();
+  driftDiagnosticsEnabled_ = imageDiagnosticsOptIn(vioParameters_.diagnostics.image);
 
   imageSubscribers_.resize(vioParameters_.nCameraSystem.numCameras());
   imagePreprocessors_.reserve(vioParameters_.nCameraSystem.numCameras());
@@ -187,9 +189,7 @@ void Subscriber::imageCallback(const sensor_msgs::msg::Image::ConstSharedPtr msg
   t -= okvis::Duration(vioParameters_.sensors_information.imageDelay);
 
   bool emitImageDiagnostic = false;
-  const bool driftDiagnosticsEnabled = vioParameters_.visualization.displayImages ||
-                                       vioParameters_.visualization.publishDebugImages || driftDiagnosticsEnabled_;
-  if (driftDiagnosticsEnabled) {
+  if (driftDiagnosticsEnabled_) {
     const int64_t diagnosticSecond = static_cast<int64_t>(std::floor(t.toSec()));
     std::lock_guard<std::mutex> lock(imageDiagnosticsMutex_);
     if (cameraIndex < lastImageDiagnosticSecond_.size() &&

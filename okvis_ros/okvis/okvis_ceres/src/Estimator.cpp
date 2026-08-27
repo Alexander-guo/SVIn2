@@ -62,6 +62,14 @@
 /// \brief okvis Main namespace of this package.
 namespace okvis {
 
+namespace {
+bool environmentFlagOrDefault(const char* name, bool defaultValue) {
+  const char* value = std::getenv(name);
+  if (value == nullptr) return defaultValue;
+  return std::strcmp(value, "1") == 0;
+}
+}  // namespace
+
 // Constructor if a ceres map is already available.
 Estimator::Estimator(std::shared_ptr<okvis::ceres::Map> mapPtr)
     : mapPtr_(mapPtr),
@@ -503,11 +511,8 @@ bool vectorContains(const std::vector<T>& vector, const T& query) {
 bool Estimator::applyMarginalizationStrategy(size_t numKeyframes,
                                              size_t numImuFrames,
                                              okvis::MapPointVector& removedLandmarks) {
-  const char* retentionDiagnosticValue =
-      std::getenv("SVIN2_ENABLE_RETENTION_ELIGIBILITY_DIAGNOSTICS");
-  const bool retentionDiagnosticsEnabled =
-      retentionDiagnosticValue != nullptr &&
-      std::strcmp(retentionDiagnosticValue, "1") == 0;
+  const bool retentionDiagnosticsEnabled = environmentFlagOrDefault(
+      "SVIN2_ENABLE_RETENTION_ELIGIBILITY_DIAGNOSTICS", retentionDiagnosticsEnabled_);
   const double retentionDiagnosticTimestamp =
       statesMap_.empty() ? 0.0 : statesMap_.rbegin()->second.timestamp.toSec();
   const bool retentionDiagnosticWindow =
@@ -520,11 +525,8 @@ bool Estimator::applyMarginalizationStrategy(size_t numKeyframes,
   size_t retentionDiagnosticsEmitted = 0;
   constexpr size_t kMaximumRetentionDiagnosticsPerMarginalization = 512;
 
-  const char* retentionPolicyValue =
-      std::getenv("SVIN2_ENABLE_FINITE_LANDMARK_RETENTION");
-  const bool retentionPolicyEnabled =
-      retentionPolicyValue != nullptr &&
-      std::strcmp(retentionPolicyValue, "1") == 0;
+  const bool retentionPolicyEnabled = environmentFlagOrDefault(
+      "SVIN2_ENABLE_FINITE_LANDMARK_RETENTION", finiteLandmarkRetentionEnabled_);
   const double retentionPolicyTimestamp =
       statesMap_.empty() ? 0.0 : statesMap_.rbegin()->second.timestamp.toSec();
   constexpr size_t kMaximumNewRetentionsPerMarginalization = 16;
@@ -547,7 +549,7 @@ bool Estimator::applyMarginalizationStrategy(size_t numKeyframes,
     if (retainedIt == retainedLandmarkFirstRetentionTime_.end()) return;
     retainedLandmarkFirstRetentionTime_.erase(retainedIt);
     retentionReleasedThisCall.insert(landmarkId);
-    if (retentionPolicyEnabled && retentionDiagnosticWindow) {
+    if (retentionPolicyEnabled && retentionDiagnosticsEnabled && retentionDiagnosticWindow) {
       LOG(INFO) << "[RETENTION_POLICY_DECISION]"
                 << " landmark_id=" << landmarkId
                 << " decision=release"
@@ -556,7 +558,7 @@ bool Estimator::applyMarginalizationStrategy(size_t numKeyframes,
   };
 
   auto logRetentionPolicySummary = [&]() {
-    if (!retentionPolicyEnabled) return;
+    if (!retentionPolicyEnabled || !retentionDiagnosticsEnabled) return;
     LOG(INFO) << std::setprecision(17)
               << "[RETENTION_POLICY_SUMMARY]"
               << " newest_time_s=" << retentionPolicyTimestamp
@@ -588,7 +590,7 @@ bool Estimator::applyMarginalizationStrategy(size_t numKeyframes,
         retainedIt = retainedLandmarkFirstRetentionTime_.erase(retainedIt);
         retentionReleasedThisCall.insert(landmarkId);
         if (expired && !removed) retentionExpiredThisCall.insert(landmarkId);
-        if (retentionDiagnosticWindow) {
+        if (retentionDiagnosticsEnabled && retentionDiagnosticWindow) {
           LOG(INFO) << "[RETENTION_POLICY_DECISION]"
                     << " landmark_id=" << landmarkId
                     << " decision=release"
@@ -998,7 +1000,7 @@ bool Estimator::applyMarginalizationStrategy(size_t numKeyframes,
               ++retentionPolicyRemovedObservations;
             }
           }
-          if (retentionDiagnosticWindow) {
+          if (retentionDiagnosticsEnabled && retentionDiagnosticWindow) {
             LOG(INFO) << std::setprecision(17)
                       << "[RETENTION_POLICY_DECISION]"
                       << " landmark_id=" << pit->first
@@ -1331,7 +1333,7 @@ bool Estimator::applyMarginalizationStrategy(size_t numKeyframes,
               retainedLandmarkFirstRetentionTime_.size() < kMaximumTrackedRetentions;
           if (!perCallCapacityAvailable || !totalCapacityAvailable) {
             ++retentionPolicyCapacityRejected;
-            if (retentionDiagnosticWindow) {
+            if (retentionDiagnosticsEnabled && retentionDiagnosticWindow) {
               LOG(INFO) << std::setprecision(17)
                         << "[RETENTION_POLICY_DECISION]"
                         << " landmark_id=" << pit->first
@@ -1351,7 +1353,7 @@ bool Estimator::applyMarginalizationStrategy(size_t numKeyframes,
                   std::make_pair(pit->first, retentionPolicyTimestamp));
               ++retentionPolicyNewlySelected;
             }
-            if (retentionDiagnosticWindow) {
+            if (retentionDiagnosticsEnabled && retentionDiagnosticWindow) {
               LOG(INFO) << std::setprecision(17)
                         << "[RETENTION_POLICY_DECISION]"
                         << " landmark_id=" << pit->first
@@ -1393,7 +1395,7 @@ bool Estimator::applyMarginalizationStrategy(size_t numKeyframes,
                    !retentionTracked && !skipLandmark &&
                    retentionEligibilityComputed && !retentionEligibility.eligible) {
           ++retentionPolicyIneligible;
-          if (retentionDiagnosticWindow) {
+          if (retentionDiagnosticsEnabled && retentionDiagnosticWindow) {
             const char* reason = "ineligible";
             if (!retentionEligibility.finiteInitialized) {
               reason = "invalid_point";

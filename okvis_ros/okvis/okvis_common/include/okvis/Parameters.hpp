@@ -302,6 +302,25 @@ struct Optimization {
   int numKeyframes;    ///< Number of keyframes.
   int numImuFrames;    ///< Number of IMU frames.
   int numSonarFrames;  ///< Number of Sonar frames @Sharmin
+  bool finiteLandmarkRetention = true;  ///< Preserve eligible finite landmarks across bounded support gaps.
+};
+
+/// Worker counts for the stages that provide genuine internal parallelism.
+struct ThreadingParameters {
+  int matcherThreads = 4;    ///< Dense descriptor-matching worker count.
+  int estimatorThreads = 2;  ///< Ceres residual/Jacobian evaluation worker count.
+};
+
+/// Expensive runtime diagnostics. All are opt-in by default.
+struct DiagnosticsParameters {
+  bool drift = false;              ///< Estimator drift/support diagnostics.
+  bool retention = false;          ///< Finite-landmark retention decision/summary diagnostics.
+  bool image = false;              ///< Image preprocessing, quality, and callback diagnostics.
+  bool imuWindow = false;          ///< IMU selection-window diagnostics.
+  bool landmarkPromotion = false;  ///< Bearing-to-finite landmark promotion diagnostics.
+  bool bearingTracking = false;    ///< Bearing-track and bearing-RANSAC diagnostics.
+  bool triangulation = false;      ///< Probabilistic stereo-triangulation diagnostics.
+  bool reprojection = false;       ///< Invalid reprojection detail diagnostics.
 };
 
 /**
@@ -351,6 +370,8 @@ struct ResetPoseParameters {
 struct VioParameters {
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
   Optimization optimization;                          ///< Optimization parameters.
+  ThreadingParameters threading;                      ///< Internal worker counts.
+  DiagnosticsParameters diagnostics;                  ///< Opt-in runtime diagnostics.
   Visualization visualization;                        ///< Visualization parameters.
   SensorsInformation sensors_information;             ///< Information on camera and IMU setup.
   ExtrinsicsEstimationParameters camera_extrinsics;   ///< Camera extrinsic estimation parameters.

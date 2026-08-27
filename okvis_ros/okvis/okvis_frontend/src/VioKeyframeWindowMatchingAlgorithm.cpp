@@ -76,6 +76,11 @@ bool retentionHammingProbeWindow(const okvis::Time& timestamp) {
          (seconds >= 11336.0 && seconds <= 11346.0);
 }
 
+bool promotionDiagnosticsOptIn(bool configuredDefault) {
+  const char* value = std::getenv("SVIN2_ENABLE_PROMOTION_DIAGNOSTICS");
+  return value == nullptr ? configuredDefault : std::strcmp(value, "1") == 0;
+}
+
 }  // namespace
 
 // Constructor.
@@ -86,12 +91,14 @@ VioKeyframeWindowMatchingAlgorithm<CAMERA_GEOMETRY_T>::VioKeyframeWindowMatching
     int matchingType,
     float distanceThreshold,
     bool usePoseUncertainty,
-    bool useSCM) {
+    bool useSCM,
+    bool promotionDiagnostics) {
   matchingType_ = matchingType;
   distanceThreshold_ = distanceThreshold;
   estimator_ = &estimator;
   usePoseUncertainty_ = usePoseUncertainty;
   useSCM_ = useSCM;
+  promotionDiagnosticsEnabled_ = promotionDiagnosticsOptIn(promotionDiagnostics);
   // std::cout << "USE SCM: "<< useSCM <<std::endl;
 }
 
@@ -582,23 +589,25 @@ size_t VioKeyframeWindowMatchingAlgorithm<CAMERA_GEOMETRY_T>::promoteTrack(
     ++numPromotionDeferredObservations_;
   }
 
-  static std::atomic<uint64_t> promotionDiagnosticCount{0};
-  const uint64_t diagnosticCount =
-      promotionDiagnosticCount.fetch_add(1, std::memory_order_relaxed) + 1;
-  if (diagnosticCount <= 50 || diagnosticCount % 1000 == 0) {
-    LOG(INFO) << "[PROMOTION_DIAGNOSTIC] event=" << diagnosticCount
-              << " track_id=" << trackId << " decision=" << decision
-              << " observations_total=" << observations.size()
-              << " bearing_observations=" << bearingObservations.size()
-              << " observations_valid=" << validObservations.size()
-              << " distinct_frames=" << distinctFrames.size()
-              << " frame_span_s=" << frameSpanSeconds
-              << " baseline_m=" << maximumBaseline
-              << " range_min_m=" << (std::isfinite(minimumRange) ? minimumRange : 0.0)
-              << " range_max_m=" << maximumRange
-              << " baseline_range_ratio=" << baselineRangeRatio
-              << " parallax_deg=" << maximumParallax * 180.0 / M_PI
-              << " required_parallax_deg=" << kMinimumPromotionParallaxRadians * 180.0 / M_PI;
+  if (promotionDiagnosticsEnabled_) {
+    static std::atomic<uint64_t> promotionDiagnosticCount{0};
+    const uint64_t diagnosticCount =
+        promotionDiagnosticCount.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (diagnosticCount <= 50 || diagnosticCount % 1000 == 0) {
+      LOG(INFO) << "[PROMOTION_DIAGNOSTIC] event=" << diagnosticCount
+                << " track_id=" << trackId << " decision=" << decision
+                << " observations_total=" << observations.size()
+                << " bearing_observations=" << bearingObservations.size()
+                << " observations_valid=" << validObservations.size()
+                << " distinct_frames=" << distinctFrames.size()
+                << " frame_span_s=" << frameSpanSeconds
+                << " baseline_m=" << maximumBaseline
+                << " range_min_m=" << (std::isfinite(minimumRange) ? minimumRange : 0.0)
+                << " range_max_m=" << maximumRange
+                << " baseline_range_ratio=" << baselineRangeRatio
+                << " parallax_deg=" << maximumParallax * 180.0 / M_PI
+                << " required_parallax_deg=" << kMinimumPromotionParallaxRadians * 180.0 / M_PI;
+    }
   }
   if (!canPromote) return 0;
 

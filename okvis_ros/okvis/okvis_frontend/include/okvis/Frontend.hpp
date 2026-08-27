@@ -237,6 +237,13 @@ class Frontend : public VioFrontendInterface {
   /// @brief Set the matching threshold.
   void setBriskMatchingThreshold(double threshold) { briskMatchingThreshold_ = threshold; }
 
+  /// @brief Recreate the dense matcher with the requested worker count.
+  /// Call only during initialization, before matching begins.
+  void setMatcherThreads(size_t threads) {
+    OKVIS_ASSERT_TRUE(Exception, threads >= 1 && threads <= 255, "Matcher thread count must be in [1, 255].");
+    matcher_.reset(new okvis::DenseMatcher(static_cast<unsigned char>(threads)));
+  }
+
   /// @brief Set the area overlap threshold under which a new keyframe is inserted.
   void setKeyframeInsertionOverlapThreshold(float threshold) { keyframeInsertionOverlapThreshold_ = threshold; }
 

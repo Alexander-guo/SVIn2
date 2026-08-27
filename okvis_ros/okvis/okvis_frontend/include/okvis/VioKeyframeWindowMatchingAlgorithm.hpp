@@ -84,7 +84,8 @@ class VioKeyframeWindowMatchingAlgorithm : public okvis::MatchingAlgorithm {
                                      int matchingType,
                                      float distanceThreshold,
                                      bool usePoseUncertainty = true,
-                                     bool useSCM = false);
+                                     bool useSCM = false,
+                                     bool promotionDiagnostics = false);
 
   virtual ~VioKeyframeWindowMatchingAlgorithm();
 
@@ -314,6 +315,7 @@ class VioKeyframeWindowMatchingAlgorithm : public okvis::MatchingAlgorithm {
   bool validRelativeUncertainty_ = false;
   bool usePoseUncertainty_ = false;
   bool useSCM_ = false;
+  bool promotionDiagnosticsEnabled_ = false;
 
   /// Opt-in, shadow-only Hamming diagnostics collected by source index while
   /// DenseMatcher workers run, then emitted after all workers have joined.

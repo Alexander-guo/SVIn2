@@ -51,6 +51,21 @@ void copyWithoutSpatialBalancing(std::istream& input, std::ostream& output) {
   }
 }
 
+void copyWithoutRuntimeControls(std::istream& input, std::ostream& output) {
+  std::string line;
+  bool skippingBlock = false;
+  while (std::getline(input, line)) {
+    if (line.rfind("finiteLandmarkRetention:", 0) == 0) continue;
+    if (line == "threading_options:" || line == "diagnostics_options:") {
+      skippingBlock = true;
+      continue;
+    }
+    if (skippingBlock && line.rfind("    ", 0) == 0) continue;
+    if (skippingBlock && !line.empty()) skippingBlock = false;
+    output << line << '\n';
+  }
+}
+
 }  // namespace
 
 TEST(DetectionParameters, ReadsExplicitBriskAbsoluteThreshold) {
@@ -155,4 +170,71 @@ TEST(DetectionParameters, ReadsEnabledSpatialBalancingAndLocalPadding) {
   EXPECT_EQ(parameters.candidateMultiplier, 4);
   EXPECT_EQ(parameters.minimumPerValidCell, 12);
   EXPECT_EQ(parameters.localPaddingPixels, 48);
+}
+
+TEST(DetectionParameters, ReadsRuntimePolicyDiagnosticsAndThreadCounts) {
+  std::ifstream input(OKVIS_TEST_X5_CONFIG);
+  ASSERT_TRUE(input.good());
+  TemporaryConfig temporary;
+  std::ofstream output(temporary.path());
+  ASSERT_TRUE(output.good());
+  std::string line;
+  while (std::getline(input, line)) {
+    if (line.find("    matcherThreads:") == 0) {
+      output << "    matcherThreads: 8\n";
+    } else if (line.find("    estimatorThreads:") == 0) {
+      output << "    estimatorThreads: 4\n";
+    } else if (line.find("    image:") == 0) {
+      output << "    image: true\n";
+    } else if (line.find("    imuWindow:") == 0) {
+      output << "    imuWindow: true\n";
+    } else if (line.find("    landmarkPromotion:") == 0) {
+      output << "    landmarkPromotion: true\n";
+    } else if (line.find("    bearingTracking:") == 0) {
+      output << "    bearingTracking: true\n";
+    } else if (line.find("    triangulation:") == 0) {
+      output << "    triangulation: true\n";
+    } else if (line.find("    reprojection:") == 0) {
+      output << "    reprojection: true\n";
+    } else {
+      output << line << '\n';
+    }
+  }
+  output.close();
+
+  const okvis::VioParameters parameters = readParameters(temporary.path());
+  EXPECT_TRUE(parameters.optimization.finiteLandmarkRetention);
+  EXPECT_EQ(parameters.threading.matcherThreads, 8);
+  EXPECT_EQ(parameters.threading.estimatorThreads, 4);
+  EXPECT_FALSE(parameters.diagnostics.drift);
+  EXPECT_FALSE(parameters.diagnostics.retention);
+  EXPECT_TRUE(parameters.diagnostics.image);
+  EXPECT_TRUE(parameters.diagnostics.imuWindow);
+  EXPECT_TRUE(parameters.diagnostics.landmarkPromotion);
+  EXPECT_TRUE(parameters.diagnostics.bearingTracking);
+  EXPECT_TRUE(parameters.diagnostics.triangulation);
+  EXPECT_TRUE(parameters.diagnostics.reprojection);
+}
+
+TEST(DetectionParameters, UsesSafeRuntimeDefaultsWhenControlsAreOmitted) {
+  std::ifstream input(OKVIS_TEST_X5_CONFIG);
+  ASSERT_TRUE(input.good());
+  TemporaryConfig temporary;
+  std::ofstream output(temporary.path());
+  ASSERT_TRUE(output.good());
+  copyWithoutRuntimeControls(input, output);
+  output.close();
+
+  const okvis::VioParameters parameters = readParameters(temporary.path());
+  EXPECT_TRUE(parameters.optimization.finiteLandmarkRetention);
+  EXPECT_EQ(parameters.threading.matcherThreads, 4);
+  EXPECT_EQ(parameters.threading.estimatorThreads, 2);
+  EXPECT_FALSE(parameters.diagnostics.drift);
+  EXPECT_FALSE(parameters.diagnostics.retention);
+  EXPECT_FALSE(parameters.diagnostics.image);
+  EXPECT_FALSE(parameters.diagnostics.imuWindow);
+  EXPECT_FALSE(parameters.diagnostics.landmarkPromotion);
+  EXPECT_FALSE(parameters.diagnostics.bearingTracking);
+  EXPECT_FALSE(parameters.diagnostics.triangulation);
+  EXPECT_FALSE(parameters.diagnostics.reprojection);
 }

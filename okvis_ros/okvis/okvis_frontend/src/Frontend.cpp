@@ -538,7 +538,8 @@ int Frontend::matchToKeyframes(okvis::Estimator& estimator,
     if (!estimator.isKeyframe(olderFrameId)) continue;
     for (size_t im = 0; im < params.nCameraSystem.numCameras(); ++im) {
       MATCHING_ALGORITHM matchingAlgorithm(
-          estimator, MATCHING_ALGORITHM::Match3D2D, briskMatchingThreshold_, usePoseUncertainty);
+          estimator, MATCHING_ALGORITHM::Match3D2D, briskMatchingThreshold_, usePoseUncertainty,
+          false, params.diagnostics.landmarkPromotion);
       matchingAlgorithm.setFrames(olderFrameId, currentFrameId, im, im);
 
       // match 3D-2D
@@ -558,26 +559,29 @@ int Frontend::matchToKeyframes(okvis::Estimator& estimator,
     if (!estimator.isKeyframe(olderFrameId)) continue;
     for (size_t im = 0; im < params.nCameraSystem.numCameras(); ++im) {
       MATCHING_ALGORITHM matchingAlgorithm(
-          estimator, MATCHING_ALGORITHM::Match2D2D, briskMatchingThreshold_, usePoseUncertainty);
+          estimator, MATCHING_ALGORITHM::Match2D2D, briskMatchingThreshold_, usePoseUncertainty,
+          false, params.diagnostics.landmarkPromotion);
       matchingAlgorithm.setFrames(olderFrameId, currentFrameId, im, im);
 
       // match 2D-2D for initialization of new (mono-)correspondences
       matcher_->match<MATCHING_ALGORITHM>(matchingAlgorithm);
       retCtr += matchingAlgorithm.numMatches();
       numUncertainMatches += matchingAlgorithm.numUncertainMatches();
-      LOG_EVERY_N(INFO, 10000) << "[BEARING_TRACK_DIAGNOSTIC] context=keyframe"
-                            << " frame_a=" << olderFrameId << " frame_b=" << currentFrameId
-                            << " camera=" << im << " matches=" << matchingAlgorithm.numMatches()
-                            << " bearing_only=" << matchingAlgorithm.numBearingOnlyMatches()
-                            << " finite=" << matchingAlgorithm.numFiniteMatches()
-                            << " promotions=" << matchingAlgorithm.numPromotions()
-                            << " promotion_attempts=" << matchingAlgorithm.numPromotionAttempts()
-                            << " deferred_observations="
-                            << matchingAlgorithm.numPromotionDeferredObservations()
-                            << " deferred_frames=" << matchingAlgorithm.numPromotionDeferredFrames()
-                            << " deferred_parallax=" << matchingAlgorithm.numPromotionDeferredParallax()
-                            << " rejected_candidates=" << matchingAlgorithm.numRejectedCandidates()
-                            << " active_pending=" << matchingAlgorithm.numActivePendingTracks();
+      if (params.diagnostics.bearingTracking) {
+        LOG_EVERY_N(INFO, 10000) << "[BEARING_TRACK_DIAGNOSTIC] context=keyframe"
+                                  << " frame_a=" << olderFrameId << " frame_b=" << currentFrameId
+                                  << " camera=" << im << " matches=" << matchingAlgorithm.numMatches()
+                                  << " bearing_only=" << matchingAlgorithm.numBearingOnlyMatches()
+                                  << " finite=" << matchingAlgorithm.numFiniteMatches()
+                                  << " promotions=" << matchingAlgorithm.numPromotions()
+                                  << " promotion_attempts=" << matchingAlgorithm.numPromotionAttempts()
+                                  << " deferred_observations="
+                                  << matchingAlgorithm.numPromotionDeferredObservations()
+                                  << " deferred_frames=" << matchingAlgorithm.numPromotionDeferredFrames()
+                                  << " deferred_parallax=" << matchingAlgorithm.numPromotionDeferredParallax()
+                                  << " rejected_candidates=" << matchingAlgorithm.numRejectedCandidates()
+                                  << " active_pending=" << matchingAlgorithm.numActivePendingTracks();
+      }
     }
 
     // remove outliers
@@ -590,9 +594,12 @@ int Frontend::matchToKeyframes(okvis::Estimator& estimator,
     // rejection after initialization, but only initialize the pose at startup.
     const int bearingRansacInliers = runRansac2d2d(
         estimator, params, currentFrameId, olderFrameId, !isInitialized_, removeOutliers, rotationOnly_tmp);
-    LOG_EVERY_N(INFO, 10000) << "[BEARING_RANSAC_DIAGNOSTIC] context=keyframe"
-                          << " frame_a=" << olderFrameId << " frame_b=" << currentFrameId
-                          << " inliers=" << bearingRansacInliers << " rotation_only=" << rotationOnly_tmp;
+    if (params.diagnostics.bearingTracking) {
+      LOG_EVERY_N(INFO, 10000) << "[BEARING_RANSAC_DIAGNOSTIC] context=keyframe"
+                                << " frame_a=" << olderFrameId << " frame_b=" << currentFrameId
+                                << " inliers=" << bearingRansacInliers
+                                << " rotation_only=" << rotationOnly_tmp;
+    }
     // Sharmin: commented for scale
     if (firstFrame) {
       rotationOnly = rotationOnly_tmp;
@@ -638,7 +645,8 @@ int Frontend::matchToLastFrame(okvis::Estimator& estimator,
 
   for (size_t im = 0; im < params.nCameraSystem.numCameras(); ++im) {
     MATCHING_ALGORITHM matchingAlgorithm(
-        estimator, MATCHING_ALGORITHM::Match3D2D, briskMatchingThreshold_, usePoseUncertainty);
+        estimator, MATCHING_ALGORITHM::Match3D2D, briskMatchingThreshold_, usePoseUncertainty,
+        false, params.diagnostics.landmarkPromotion);
     matchingAlgorithm.setFrames(lastFrameId, currentFrameId, im, im);
 
     // match 3D-2D
@@ -651,25 +659,28 @@ int Frontend::matchToLastFrame(okvis::Estimator& estimator,
 
   for (size_t im = 0; im < params.nCameraSystem.numCameras(); ++im) {
     MATCHING_ALGORITHM matchingAlgorithm(
-        estimator, MATCHING_ALGORITHM::Match2D2D, briskMatchingThreshold_, usePoseUncertainty);
+        estimator, MATCHING_ALGORITHM::Match2D2D, briskMatchingThreshold_, usePoseUncertainty,
+        false, params.diagnostics.landmarkPromotion);
     matchingAlgorithm.setFrames(lastFrameId, currentFrameId, im, im);
 
     // match 2D-2D for initialization of new (mono-)correspondences
     matcher_->match<MATCHING_ALGORITHM>(matchingAlgorithm);
     retCtr += matchingAlgorithm.numMatches();
-    LOG_EVERY_N(INFO, 10000) << "[BEARING_TRACK_DIAGNOSTIC] context=last_frame"
-                          << " frame_a=" << lastFrameId << " frame_b=" << currentFrameId
-                          << " camera=" << im << " matches=" << matchingAlgorithm.numMatches()
-                          << " bearing_only=" << matchingAlgorithm.numBearingOnlyMatches()
-                          << " finite=" << matchingAlgorithm.numFiniteMatches()
-                          << " promotions=" << matchingAlgorithm.numPromotions()
-                          << " promotion_attempts=" << matchingAlgorithm.numPromotionAttempts()
-                          << " deferred_observations="
-                          << matchingAlgorithm.numPromotionDeferredObservations()
-                          << " deferred_frames=" << matchingAlgorithm.numPromotionDeferredFrames()
-                          << " deferred_parallax=" << matchingAlgorithm.numPromotionDeferredParallax()
-                          << " rejected_candidates=" << matchingAlgorithm.numRejectedCandidates()
-                          << " active_pending=" << matchingAlgorithm.numActivePendingTracks();
+    if (params.diagnostics.bearingTracking) {
+      LOG_EVERY_N(INFO, 10000) << "[BEARING_TRACK_DIAGNOSTIC] context=last_frame"
+                                << " frame_a=" << lastFrameId << " frame_b=" << currentFrameId
+                                << " camera=" << im << " matches=" << matchingAlgorithm.numMatches()
+                                << " bearing_only=" << matchingAlgorithm.numBearingOnlyMatches()
+                                << " finite=" << matchingAlgorithm.numFiniteMatches()
+                                << " promotions=" << matchingAlgorithm.numPromotions()
+                                << " promotion_attempts=" << matchingAlgorithm.numPromotionAttempts()
+                                << " deferred_observations="
+                                << matchingAlgorithm.numPromotionDeferredObservations()
+                                << " deferred_frames=" << matchingAlgorithm.numPromotionDeferredFrames()
+                                << " deferred_parallax=" << matchingAlgorithm.numPromotionDeferredParallax()
+                                << " rejected_candidates=" << matchingAlgorithm.numRejectedCandidates()
+                                << " active_pending=" << matchingAlgorithm.numActivePendingTracks();
+    }
     // LOG(INFO) << "Number of matches to last frame (2D-2D): " << matchingAlgorithm.numMatches();
   }
 
@@ -678,9 +689,11 @@ int Frontend::matchToLastFrame(okvis::Estimator& estimator,
   const int bearingRansacInliers =
       runRansac2d2d(estimator, params, currentFrameId, lastFrameId, false, removeOutliers,
                     rotationOnly, true);
+  if (params.diagnostics.bearingTracking) {
     LOG_EVERY_N(INFO, 10000) << "[BEARING_RANSAC_DIAGNOSTIC] context=last_frame"
-                        << " frame_a=" << lastFrameId << " frame_b=" << currentFrameId
-                        << " inliers=" << bearingRansacInliers << " rotation_only=" << rotationOnly;
+                              << " frame_a=" << lastFrameId << " frame_b=" << currentFrameId
+                              << " inliers=" << bearingRansacInliers << " rotation_only=" << rotationOnly;
+  }
 
   return retCtr;
 }
@@ -709,7 +722,9 @@ void Frontend::matchStereo(okvis::Estimator& estimator,
           estimator,
           MATCHING_ALGORITHM::Match2D2D,
           briskMatchingThreshold_,
-          false);  // TODO(test): make sure this is changed when switching back to uncertainty based matching
+          false,
+          false,
+          params.diagnostics.landmarkPromotion);  // TODO(test): verify when uncertainty-based matching is restored
       matchingAlgorithm.setFrames(mfId, mfId, im0, im1);  // newest frame
 
       // match 2D-2D
