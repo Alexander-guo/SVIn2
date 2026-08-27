@@ -138,8 +138,23 @@ class VioKeyframeWindowMatchingAlgorithm : public okvis::MatchingAlgorithm {
     const float dist = static_cast<float>(specificDescriptorDistance(frameA_->keypointDescriptor(camIdA_, indexA),
                                                                      frameB_->keypointDescriptor(camIdB_, indexB)));
 
+    if (retentionHammingProbeEnabled_ && indexA < retentionHammingProbes_.size() &&
+        indexA < retentionHammingSourceLandmarkIds_.size() &&
+        retentionHammingSourceLandmarkIds_[indexA] != 0) {
+      RetentionHammingProbe& probe = retentionHammingProbes_[indexA];
+      ++probe.comparisonCount;
+      const uint32_t hammingDistance = static_cast<uint32_t>(dist);
+      if (hammingDistance < probe.bestHamming) probe.bestHamming = hammingDistance;
+    }
+
     if (dist < distanceThreshold_) {
-      if (verifyMatch(indexA, indexB)) return dist;
+      const bool geometryPassed = verifyMatch(indexA, indexB);
+      if (retentionHammingProbeEnabled_ && indexA < retentionHammingProbes_.size() &&
+          indexA < retentionHammingSourceLandmarkIds_.size() &&
+          retentionHammingSourceLandmarkIds_[indexA] != 0 && geometryPassed) {
+        ++retentionHammingProbes_[indexA].geometryPassCount;
+      }
+      if (geometryPassed) return dist;
     }
     return std::numeric_limits<float>::max();
   }
@@ -201,6 +216,12 @@ class VioKeyframeWindowMatchingAlgorithm : public okvis::MatchingAlgorithm {
   bool isRelativeUncertaintyValid() { return validRelativeUncertainty_; }
 
  private:
+  struct RetentionHammingProbe {
+    uint32_t bestHamming = std::numeric_limits<uint32_t>::max();
+    size_t comparisonCount = 0;
+    size_t geometryPassCount = 0;
+  };
+
   /// \brief This is essentially the map.
   okvis::Estimator* estimator_;
 
@@ -293,6 +314,12 @@ class VioKeyframeWindowMatchingAlgorithm : public okvis::MatchingAlgorithm {
   bool validRelativeUncertainty_ = false;
   bool usePoseUncertainty_ = false;
   bool useSCM_ = false;
+
+  /// Opt-in, shadow-only Hamming diagnostics collected by source index while
+  /// DenseMatcher workers run, then emitted after all workers have joined.
+  bool retentionHammingProbeEnabled_ = false;
+  std::vector<uint64_t> retentionHammingSourceLandmarkIds_;
+  mutable std::vector<RetentionHammingProbe> retentionHammingProbes_;
 
   std::vector<okvis::KeypointIdentifier> trackObservations(uint64_t trackId) const;
   bool mergePendingTracks(uint64_t targetId, uint64_t sourceId);

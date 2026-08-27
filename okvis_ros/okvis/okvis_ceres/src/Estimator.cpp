@@ -40,6 +40,14 @@
 
 #include <glog/logging.h>
 
+#include <algorithm>
+#include <cmath>
+#include <cstdlib>
+#include <cstring>
+#include <iomanip>
+#include <limits>
+#include <set>
+
 #include <okvis/Estimator.hpp>
 #include <okvis/IdProvider.hpp>
 #include <okvis/MultiFrame.hpp>
@@ -495,12 +503,110 @@ bool vectorContains(const std::vector<T>& vector, const T& query) {
 bool Estimator::applyMarginalizationStrategy(size_t numKeyframes,
                                              size_t numImuFrames,
                                              okvis::MapPointVector& removedLandmarks) {
+  const char* retentionDiagnosticValue =
+      std::getenv("SVIN2_ENABLE_RETENTION_ELIGIBILITY_DIAGNOSTICS");
+  const bool retentionDiagnosticsEnabled =
+      retentionDiagnosticValue != nullptr &&
+      std::strcmp(retentionDiagnosticValue, "1") == 0;
+  const double retentionDiagnosticTimestamp =
+      statesMap_.empty() ? 0.0 : statesMap_.rbegin()->second.timestamp.toSec();
+  const bool retentionDiagnosticWindow =
+      (retentionDiagnosticTimestamp >= 11265.0 &&
+       retentionDiagnosticTimestamp <= 11275.0) ||
+      (retentionDiagnosticTimestamp >= 11281.0 &&
+       retentionDiagnosticTimestamp <= 11291.0) ||
+      (retentionDiagnosticTimestamp >= 11336.0 &&
+       retentionDiagnosticTimestamp <= 11346.0);
+  size_t retentionDiagnosticsEmitted = 0;
+  constexpr size_t kMaximumRetentionDiagnosticsPerMarginalization = 512;
+
+  const char* retentionPolicyValue =
+      std::getenv("SVIN2_ENABLE_FINITE_LANDMARK_RETENTION");
+  const bool retentionPolicyEnabled =
+      retentionPolicyValue != nullptr &&
+      std::strcmp(retentionPolicyValue, "1") == 0;
+  const double retentionPolicyTimestamp =
+      statesMap_.empty() ? 0.0 : statesMap_.rbegin()->second.timestamp.toSec();
+  constexpr size_t kMaximumNewRetentionsPerMarginalization = 16;
+  constexpr size_t kMaximumTrackedRetentions = 64;
+  constexpr double kMaximumRetentionAgeSeconds = 1.0;
+  size_t retentionPolicyNewlySelected = 0;
+  size_t retentionPolicyCandidates = 0;
+  size_t retentionPolicyRemoved = 0;
+  size_t retentionPolicyExpired = 0;
+  size_t retentionPolicyRecovered = 0;
+  size_t retentionPolicyIneligible = 0;
+  size_t retentionPolicyCapacityRejected = 0;
+  size_t retentionPolicyRemovedObservations = 0;
+  std::set<uint64_t> retentionReleasedThisCall;
+  std::set<uint64_t> retentionExpiredThisCall;
+
+  auto releaseRetentionTracking = [&](uint64_t landmarkId, const char* reason) {
+    std::map<uint64_t, double>::iterator retainedIt =
+        retainedLandmarkFirstRetentionTime_.find(landmarkId);
+    if (retainedIt == retainedLandmarkFirstRetentionTime_.end()) return;
+    retainedLandmarkFirstRetentionTime_.erase(retainedIt);
+    retentionReleasedThisCall.insert(landmarkId);
+    if (retentionPolicyEnabled && retentionDiagnosticWindow) {
+      LOG(INFO) << "[RETENTION_POLICY_DECISION]"
+                << " landmark_id=" << landmarkId
+                << " decision=release"
+                << " reason=" << reason;
+    }
+  };
+
+  auto logRetentionPolicySummary = [&]() {
+    if (!retentionPolicyEnabled) return;
+    LOG(INFO) << std::setprecision(17)
+              << "[RETENTION_POLICY_SUMMARY]"
+              << " newest_time_s=" << retentionPolicyTimestamp
+              << " candidates=" << retentionPolicyCandidates
+              << " newly_selected=" << retentionPolicyNewlySelected
+              << " removed_observations=" << retentionPolicyRemovedObservations
+              << " tracked_total=" << retainedLandmarkFirstRetentionTime_.size()
+              << " released_removed=" << retentionPolicyRemoved
+              << " released_expired=" << retentionPolicyExpired
+              << " released_recovered=" << retentionPolicyRecovered
+              << " released_ineligible=" << retentionPolicyIneligible
+              << " capacity_rejected=" << retentionPolicyCapacityRejected;
+  };
+
+  if (retentionPolicyEnabled) {
+    for (std::map<uint64_t, double>::iterator retainedIt =
+             retainedLandmarkFirstRetentionTime_.begin();
+         retainedIt != retainedLandmarkFirstRetentionTime_.end();) {
+      const uint64_t landmarkId = retainedIt->first;
+      const double firstRetentionTimestamp = retainedIt->second;
+      const bool removed = landmarksMap_.find(landmarkId) == landmarksMap_.end() ||
+                           !mapPtr_->parameterBlockExists(landmarkId);
+      const bool expired = !std::isfinite(firstRetentionTimestamp) ||
+                           !std::isfinite(retentionPolicyTimestamp) ||
+                           retentionPolicyTimestamp - firstRetentionTimestamp >
+                               kMaximumRetentionAgeSeconds;
+      if (removed || expired) {
+        ++(removed ? retentionPolicyRemoved : retentionPolicyExpired);
+        retainedIt = retainedLandmarkFirstRetentionTime_.erase(retainedIt);
+        retentionReleasedThisCall.insert(landmarkId);
+        if (expired && !removed) retentionExpiredThisCall.insert(landmarkId);
+        if (retentionDiagnosticWindow) {
+          LOG(INFO) << "[RETENTION_POLICY_DECISION]"
+                    << " landmark_id=" << landmarkId
+                    << " decision=release"
+                    << " reason=" << (removed ? "removed" : "expired");
+        }
+      } else {
+        ++retainedIt;
+      }
+    }
+  }
+
   // keep the newest numImuFrames
   std::map<uint64_t, States>::reverse_iterator rit = statesMap_.rbegin();
   for (size_t k = 0; k < numImuFrames; k++) {
     rit++;
     if (rit == statesMap_.rend()) {
       // nothing to do.
+      logRetentionPolicySummary();
       return true;
     }
   }
@@ -510,7 +616,10 @@ bool Estimator::applyMarginalizationStrategy(size_t numKeyframes,
     bool success = mapPtr_->removeResidualBlock(marginalizationResidualId_);
     OKVIS_ASSERT_TRUE_DBG(Exception, success, "could not remove marginalization error");
     marginalizationResidualId_ = 0;
-    if (!success) return false;
+    if (!success) {
+      logRetentionPolicySummary();
+      return false;
+    }
   }
 
   // these will keep track of what we want to marginalize out.
@@ -519,6 +628,19 @@ bool Estimator::applyMarginalizationStrategy(size_t numKeyframes,
 
   if (!marginalizationErrorPtr_) {
     marginalizationErrorPtr_.reset(new ceres::MarginalizationError(*mapPtr_.get()));
+  }
+
+  // A retained landmark must remain represented only by its explicit
+  // reprojection residuals.  Reject any point that is already a parameter of
+  // the incoming marginalization prior, even though the prior residual itself
+  // has just been detached from Map above.
+  std::set<uint64_t> existingMarginalizationPriorParameterIds;
+  if (marginalizationErrorPtr_) {
+    std::vector<std::shared_ptr<okvis::ceres::ParameterBlock>> priorParameters;
+    marginalizationErrorPtr_->getParameterBlockPtrs(priorParameters);
+    for (const auto& parameter : priorParameters) {
+      if (parameter) existingMarginalizationPriorParameterIds.insert(parameter->id());
+    }
   }
 
   // distinguish if we marginalize everything or everything but pose
@@ -536,6 +658,165 @@ bool Estimator::applyMarginalizationStrategy(size_t numKeyframes,
     allLinearizedFrames.push_back(rit->second.id);
     ++rit;  // check the next frame
   }
+
+  struct RetentionEligibility {
+    bool finiteInitialized = false;
+    bool observationGraphValid = true;
+    bool hasRemovalNonReprojection = false;
+    bool inExistingMarginalizationPrior = false;
+    size_t survivingUsableObservations = 0;
+    size_t newestFrameProjectionSuccess = 0;
+    double newestSurvivingObservationTime = -std::numeric_limits<double>::infinity();
+    double newestObservationAge = std::numeric_limits<double>::infinity();
+    bool eligible = false;
+  };
+
+  auto evaluateRetentionEligibility = [&](uint64_t landmarkId,
+                                           const okvis::MapPoint& mapPoint) {
+    RetentionEligibility result;
+    if (!mapPoint.point.allFinite() || std::abs(mapPoint.point[3]) <= 1.0e-8 ||
+        !mapPtr_->parameterBlockExists(landmarkId)) {
+      result.finiteInitialized = false;
+      return result;
+    }
+    result.finiteInitialized = isLandmarkInitialized(landmarkId);
+    if (!result.finiteInitialized || statesMap_.empty()) return result;
+    result.inExistingMarginalizationPrior =
+        existingMarginalizationPriorParameterIds.count(landmarkId) != 0;
+
+    const uint64_t newestFrameId = statesMap_.rbegin()->first;
+    const auto newestFrameIt = multiFramePtrMap_.find(newestFrameId);
+    okvis::kinematics::Transformation newestT_WS;
+    if (newestFrameIt != multiFramePtrMap_.end() && newestFrameIt->second &&
+        get_T_WS(newestFrameId, newestT_WS)) {
+      for (size_t cameraIndex = 0;
+           cameraIndex < newestFrameIt->second->numFrames(); ++cameraIndex) {
+        okvis::kinematics::Transformation T_SC;
+        const auto geometry = newestFrameIt->second->geometry(cameraIndex);
+        if (!geometry || !getCameraSensorStates(newestFrameId, cameraIndex, T_SC)) {
+          continue;
+        }
+        Eigen::Vector2d projection;
+        if (geometry->projectHomogeneous(
+                    T_SC.inverse() * newestT_WS.inverse() * mapPoint.point,
+                    &projection) == cameras::CameraBase::ProjectionStatus::Successful &&
+            projection.allFinite()) {
+          ++result.newestFrameProjectionSuccess;
+        }
+      }
+    }
+
+    const ceres::Map::ResidualBlockCollection landmarkResiduals =
+        mapPtr_->residuals(landmarkId);
+    for (size_t r = 0; r < landmarkResiduals.size(); ++r) {
+      const ceres::Map::ParameterBlockCollection residualParameters =
+          mapPtr_->parameters(landmarkResiduals[r].residualBlockId);
+      if (residualParameters.empty()) {
+        result.observationGraphValid = false;
+        continue;
+      }
+      const std::shared_ptr<ceres::ReprojectionErrorBase> reprojectionError =
+          std::dynamic_pointer_cast<ceres::ReprojectionErrorBase>(
+              landmarkResiduals[r].errorInterfacePtr);
+      const bool removalPose = vectorContains(removeFrames, residualParameters[0].first);
+      if (removalPose && !reprojectionError) {
+        result.hasRemovalNonReprojection = true;
+      } else if (!removalPose) {
+        for (size_t parameterIndex = 0;
+             parameterIndex < residualParameters.size(); ++parameterIndex) {
+          if (residualParameters[parameterIndex].first != landmarkId &&
+              vectorContains(paremeterBlocksToBeMarginalized,
+                             residualParameters[parameterIndex].first)) {
+            result.observationGraphValid = false;
+          }
+        }
+      }
+    }
+
+    for (const auto& observation : mapPoint.observations) {
+      const okvis::KeypointIdentifier& keypoint = observation.first;
+      const auto frameIt = multiFramePtrMap_.find(keypoint.frameId);
+      const auto stateIt = statesMap_.find(keypoint.frameId);
+      if (frameIt == multiFramePtrMap_.end() || stateIt == statesMap_.end() ||
+          !frameIt->second || keypoint.cameraIndex >= frameIt->second->numFrames() ||
+          keypoint.keypointIndex >= frameIt->second->numKeypoints(keypoint.cameraIndex)) {
+        result.observationGraphValid = false;
+        continue;
+      }
+
+      const ::ceres::ResidualBlockId residualId =
+          reinterpret_cast<::ceres::ResidualBlockId>(observation.second);
+      const auto& residualSpecs = mapPtr_->residualBlockId2ResidualBlockSpecMap();
+      const auto residualSpecIt = residualSpecs.find(residualId);
+      if (residualSpecIt == residualSpecs.end()) {
+        result.observationGraphValid = false;
+        continue;
+      }
+      const ceres::Map::ParameterBlockCollection residualParameters =
+          mapPtr_->parameters(residualId);
+      const std::shared_ptr<ceres::ReprojectionError2dBase> reprojectionError =
+          std::dynamic_pointer_cast<ceres::ReprojectionError2dBase>(
+              residualSpecIt->second.errorInterfacePtr);
+      if (!reprojectionError || residualParameters.size() < 3 ||
+          residualParameters[0].first != keypoint.frameId ||
+          residualParameters[1].first != landmarkId ||
+          reprojectionError->cameraId() != keypoint.cameraIndex) {
+        result.observationGraphValid = false;
+        continue;
+      }
+      const Eigen::Vector2d& measurement = reprojectionError->measurement();
+      const Eigen::Matrix2d& information = reprojectionError->information();
+      if (!measurement.allFinite() || !information.allFinite()) {
+        result.observationGraphValid = false;
+        continue;
+      }
+
+      const bool survives = !vectorContains(removeFrames, keypoint.frameId);
+      if (survives) {
+        const double observationTime = frameIt->second->timestamp().toSec();
+        if (std::isfinite(observationTime)) {
+          result.newestSurvivingObservationTime =
+              std::max(result.newestSurvivingObservationTime, observationTime);
+        }
+      }
+
+      okvis::kinematics::Transformation T_WS;
+      okvis::kinematics::Transformation T_SC;
+      const auto geometry = frameIt->second->geometry(keypoint.cameraIndex);
+      if (!geometry || !get_T_WS(keypoint.frameId, T_WS) ||
+          !getCameraSensorStates(keypoint.frameId, keypoint.cameraIndex, T_SC)) {
+        continue;
+      }
+      const Eigen::Vector4d point_C =
+          T_SC.inverse() * T_WS.inverse() * mapPoint.point;
+      Eigen::Vector2d prediction;
+      const auto projectionStatus = geometry->projectHomogeneous(point_C, &prediction);
+      const bool positiveDepth = point_C.allFinite() &&
+                                 std::abs(point_C[3]) > 1.0e-8 &&
+                                 point_C[2] / point_C[3] > 0.0;
+      const double chiSquared =
+          projectionStatus == cameras::CameraBase::ProjectionStatus::Successful &&
+                  prediction.allFinite()
+              ? (measurement - prediction).transpose() * information *
+                    (measurement - prediction)
+              : std::numeric_limits<double>::infinity();
+      if (survives && positiveDepth && std::isfinite(chiSquared) && chiSquared <= 4.0) {
+        ++result.survivingUsableObservations;
+      }
+    }
+
+    result.newestObservationAge =
+        retentionPolicyTimestamp - result.newestSurvivingObservationTime;
+    result.eligible =
+        result.observationGraphValid && !result.hasRemovalNonReprojection &&
+        !result.inExistingMarginalizationPrior &&
+        result.survivingUsableObservations >= 2 &&
+        result.newestFrameProjectionSuccess > 0 &&
+        std::isfinite(result.newestObservationAge) &&
+        result.newestObservationAge >= 0.0 &&
+        result.newestObservationAge <= kMaximumRetentionAgeSeconds;
+    return result;
+  };
 
   // marginalize everything but pose:
   for (size_t k = 0; k < removeAllButPose.size(); ++k) {
@@ -703,7 +984,69 @@ bool Estimator::applyMarginalizationStrategy(size_t numKeyframes,
           }
         }
 
+        // The retention lifetime is a bound on graph influence, not merely on
+        // accounting.  If a retained point reaches the one-second deadline
+        // without acquiring a genuinely new observation, remove its genuine
+        // observations through the ownership-safe API and retire the point.
+        if (retentionPolicyEnabled &&
+            retentionExpiredThisCall.count(pit->first) &&
+            !hasNewObservations) {
+          for (const auto& residual : residuals) {
+            if (std::dynamic_pointer_cast<ceres::ReprojectionErrorBase>(
+                    residual.errorInterfacePtr) &&
+                removeObservation(residual.residualBlockId)) {
+              ++retentionPolicyRemovedObservations;
+            }
+          }
+          if (retentionDiagnosticWindow) {
+            LOG(INFO) << std::setprecision(17)
+                      << "[RETENTION_POLICY_DECISION]"
+                      << " landmark_id=" << pit->first
+                      << " remove_frame=" << removeFrames[k]
+                      << " decision=retire"
+                      << " reason=retention_age_limit";
+          }
+          mapPtr_->removeParameterBlock(pit->first);
+          removedLandmarks.push_back(pit->second);
+          pit = landmarksMap_.erase(pit);
+          continue;
+        }
+
+        const bool retentionTracked =
+            retentionPolicyEnabled &&
+            retainedLandmarkFirstRetentionTime_.find(pit->first) !=
+                retainedLandmarkFirstRetentionTime_.end();
+        RetentionEligibility retentionEligibility;
+        bool retentionEligibilityComputed = false;
+        if (retentionPolicyEnabled && !hasNewObservations &&
+            (!skipLandmark || retentionTracked)) {
+          ++retentionPolicyCandidates;
+          retentionEligibility = evaluateRetentionEligibility(pit->first, pit->second);
+          retentionEligibilityComputed = true;
+        }
+        if (retentionPolicyEnabled && retentionTracked) {
+          if (hasNewObservations) {
+            ++retentionPolicyRecovered;
+            releaseRetentionTracking(pit->first, "recovered_new_observation");
+          } else if (!retentionEligibilityComputed || !retentionEligibility.eligible) {
+            ++retentionPolicyIneligible;
+            releaseRetentionTracking(pit->first, "ineligible");
+          }
+        }
+
         if (residuals.size() == 0) {
+          if (retentionDiagnosticsEnabled && retentionDiagnosticWindow) {
+            LOG(INFO) << std::setprecision(17)
+                      << "[RETENTION_TERMINAL_REMOVAL_DIAGNOSTIC]"
+                      << " landmark_id=" << pit->first
+                      << " remove_frame=" << removeFrames[k]
+                      << " remove_time_s=" << it->second.timestamp.toSec()
+                      << " newest_frame=" << statesMap_.rbegin()->first
+                      << " newest_time_s=" << statesMap_.rbegin()->second.timestamp.toSec()
+                      << " terminal_reason=no_active_residuals"
+                      << " observations_before=" << pit->second.observations.size();
+          }
+          releaseRetentionTracking(pit->first, "removed");
           mapPtr_->removeParameterBlock(pit->first);
           removedLandmarks.push_back(pit->second);
           pit = landmarksMap_.erase(pit);
@@ -713,6 +1056,374 @@ bool Estimator::applyMarginalizationStrategy(size_t numKeyframes,
         if (skipLandmark) {
           pit++;
           continue;
+        }
+
+        // Behavior-neutral A1 probe.  This snapshots the landmark immediately
+        // before the existing marginalization loop mutates observations or
+        // parameter ownership.  It deliberately does not retain, rehost, add,
+        // remove, or otherwise alter estimator state.
+        if (retentionDiagnosticsEnabled && retentionDiagnosticWindow &&
+            retentionDiagnosticsEmitted < kMaximumRetentionDiagnosticsPerMarginalization &&
+            pit->second.point.allFinite() && std::abs(pit->second.point[3]) > 1.0e-8 &&
+            mapPtr_->parameterBlockExists(pit->first) && isLandmarkInitialized(pit->first)) {
+          const uint64_t newestFrameId = statesMap_.empty() ? 0 : statesMap_.rbegin()->first;
+          const okvis::Time newestTimestamp = statesMap_.empty()
+                                                    ? okvis::Time(0, 0)
+                                                    : statesMap_.rbegin()->second.timestamp;
+          size_t activeObservations = 0;
+          size_t survivingObservations = 0;
+          size_t activeUsableObservations = 0;
+          size_t survivingUsableObservations = 0;
+          size_t survivingPositiveDepth = 0;
+          size_t exactResidualObservations = 0;
+          size_t invalidResidualObservations = 0;
+          size_t originalBrightObservations = 0;
+          size_t originalDarkObservations = 0;
+          size_t unknownIntensityObservations = 0;
+          std::set<uint64_t> activeFrames;
+          std::set<uint64_t> survivingFrames;
+          std::set<size_t> activeCameras;
+          std::set<size_t> survivingCameras;
+          std::vector<Eigen::Vector3d, Eigen::aligned_allocator<Eigen::Vector3d>>
+              survivingRays_W;
+          double oldestObservationTime = std::numeric_limits<double>::infinity();
+          double newestObservationTime = -std::numeric_limits<double>::infinity();
+          double maximumParallaxDegrees = 0.0;
+          double activeRobustCost = 0.0;
+          double survivingRobustCost = 0.0;
+          Eigen::Matrix3d rayNormal = Eigen::Matrix3d::Zero();
+
+          for (const auto& observation : pit->second.observations) {
+            const okvis::KeypointIdentifier& keypoint = observation.first;
+            const auto frameIt = multiFramePtrMap_.find(keypoint.frameId);
+            const auto stateIt = statesMap_.find(keypoint.frameId);
+            if (frameIt == multiFramePtrMap_.end() || stateIt == statesMap_.end() ||
+                !frameIt->second || keypoint.cameraIndex >= frameIt->second->numFrames() ||
+                keypoint.keypointIndex >=
+                    frameIt->second->numKeypoints(keypoint.cameraIndex)) {
+              continue;
+            }
+
+            ++activeObservations;
+            activeFrames.insert(keypoint.frameId);
+            activeCameras.insert(keypoint.cameraIndex);
+            const double observationTime = frameIt->second->timestamp().toSec();
+            oldestObservationTime = std::min(oldestObservationTime, observationTime);
+            newestObservationTime = std::max(newestObservationTime, observationTime);
+            const bool survives = !vectorContains(removeFrames, keypoint.frameId);
+            if (survives) {
+              ++survivingObservations;
+              survivingFrames.insert(keypoint.frameId);
+              survivingCameras.insert(keypoint.cameraIndex);
+            }
+
+            const uint8_t intensityFlags = frameIt->second->keypointIntensityFlags(
+                keypoint.cameraIndex, keypoint.keypointIndex);
+            if ((intensityFlags & okvis::Frame::PreHistogramIntensityValid) == 0) {
+              ++unknownIntensityObservations;
+            } else if ((intensityFlags & okvis::Frame::PreHistogramDark) != 0) {
+              ++originalDarkObservations;
+            } else {
+              ++originalBrightObservations;
+            }
+
+            okvis::kinematics::Transformation T_WS;
+            okvis::kinematics::Transformation T_SC;
+            if (!get_T_WS(keypoint.frameId, T_WS) ||
+                !getCameraSensorStates(keypoint.frameId, keypoint.cameraIndex, T_SC)) {
+              ++invalidResidualObservations;
+              continue;
+            }
+
+            // Recover the exact active graph factor recorded for this
+            // observation.  Eligibility must use the factor's unrobustified
+            // Mahalanobis chi-square, not a reconstructed keypoint-scale
+            // approximation.  Robust loss is reported separately below.
+            const ::ceres::ResidualBlockId residualId =
+                reinterpret_cast<::ceres::ResidualBlockId>(observation.second);
+            const auto& residualSpecs =
+                mapPtr_->residualBlockId2ResidualBlockSpecMap();
+            const auto residualSpecIt = residualSpecs.find(residualId);
+            if (residualSpecIt == residualSpecs.end()) {
+              ++invalidResidualObservations;
+              continue;
+            }
+            const ceres::Map::ParameterBlockCollection residualParameters =
+                mapPtr_->parameters(residualId);
+            const std::shared_ptr<ceres::ReprojectionError2dBase>
+                reprojectionError =
+                    std::dynamic_pointer_cast<ceres::ReprojectionError2dBase>(
+                        residualSpecIt->second.errorInterfacePtr);
+            if (!reprojectionError || residualParameters.size() < 3 ||
+                residualParameters[0].first != keypoint.frameId ||
+                residualParameters[1].first != pit->first ||
+                reprojectionError->cameraId() != keypoint.cameraIndex) {
+              ++invalidResidualObservations;
+              continue;
+            }
+            const Eigen::Vector2d& measurement = reprojectionError->measurement();
+            const Eigen::Matrix2d& information = reprojectionError->information();
+            if (!measurement.allFinite() || !information.allFinite()) {
+              ++invalidResidualObservations;
+              continue;
+            }
+
+            const Eigen::Vector4d point_C =
+                T_SC.inverse() * T_WS.inverse() * pit->second.point;
+            Eigen::Vector2d prediction;
+            const auto projectionStatus =
+                frameIt->second->geometry(keypoint.cameraIndex)
+                    ->projectHomogeneous(point_C, &prediction);
+            const bool positiveDepth = point_C.allFinite() &&
+                                       std::abs(point_C[3]) > 1.0e-8 &&
+                                       point_C[2] / point_C[3] > 0.0;
+            const double chiSquared =
+                projectionStatus == cameras::CameraBase::ProjectionStatus::Successful &&
+                        prediction.allFinite()
+                    ? (measurement - prediction).transpose() * information *
+                          (measurement - prediction)
+                    : std::numeric_limits<double>::infinity();
+            ++exactResidualObservations;
+            if (std::isfinite(chiSquared)) {
+              double rho[3] = {chiSquared, 1.0, 0.0};
+              if (residualSpecIt->second.lossFunctionPtr != nullptr) {
+                residualSpecIt->second.lossFunctionPtr->Evaluate(chiSquared, rho);
+              }
+              activeRobustCost += 0.5 * rho[0];
+              if (survives) survivingRobustCost += 0.5 * rho[0];
+            }
+            const bool usable = positiveDepth && std::isfinite(chiSquared) &&
+                                chiSquared <= 4.0;
+            if (usable) ++activeUsableObservations;
+            if (survives && positiveDepth) ++survivingPositiveDepth;
+            if (survives && usable) ++survivingUsableObservations;
+
+            if (survives) {
+              Eigen::Vector3d bearing_C;
+              if (frameIt->second->geometry(keypoint.cameraIndex)
+                      ->backProject(measurement, &bearing_C) &&
+                  bearing_C.allFinite() && bearing_C.norm() > 1.0e-12) {
+                const Eigen::Vector3d bearing_W =
+                    (T_WS * T_SC).C() * bearing_C.normalized();
+                if (bearing_W.allFinite()) {
+                  survivingRays_W.push_back(bearing_W.normalized());
+                  rayNormal += Eigen::Matrix3d::Identity() -
+                               bearing_W.normalized() * bearing_W.normalized().transpose();
+                }
+              }
+            }
+          }
+
+          for (size_t first = 0; first < survivingRays_W.size(); ++first) {
+            for (size_t second = first + 1; second < survivingRays_W.size(); ++second) {
+              const double cosine = std::clamp(
+                  survivingRays_W[first].dot(survivingRays_W[second]), -1.0, 1.0);
+              maximumParallaxDegrees = std::max(
+                  maximumParallaxDegrees, std::acos(cosine) * 180.0 / M_PI);
+            }
+          }
+          double rayNormalRelativeMinimum = 0.0;
+          if (!survivingRays_W.empty()) {
+            const Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> eigenSolver(
+                0.5 * (rayNormal + rayNormal.transpose()));
+            if (eigenSolver.info() == Eigen::Success &&
+                eigenSolver.eigenvalues().allFinite() &&
+                eigenSolver.eigenvalues()[2] > 0.0) {
+              rayNormalRelativeMinimum = std::max(
+                  0.0, eigenSolver.eigenvalues()[0] / eigenSolver.eigenvalues()[2]);
+            }
+          }
+
+          size_t newestFrameProjectionSuccess = 0;
+          const auto newestFrameIt = multiFramePtrMap_.find(newestFrameId);
+          okvis::kinematics::Transformation newestT_WS;
+          if (newestFrameIt != multiFramePtrMap_.end() && newestFrameIt->second &&
+              get_T_WS(newestFrameId, newestT_WS)) {
+            for (size_t cameraIndex = 0;
+                 cameraIndex < newestFrameIt->second->numFrames(); ++cameraIndex) {
+              okvis::kinematics::Transformation T_SC;
+              if (!getCameraSensorStates(newestFrameId, cameraIndex, T_SC)) continue;
+              Eigen::Vector2d projection;
+              if (newestFrameIt->second->geometry(cameraIndex)->projectHomogeneous(
+                      T_SC.inverse() * newestT_WS.inverse() * pit->second.point,
+                      &projection) == cameras::CameraBase::ProjectionStatus::Successful &&
+                  projection.allFinite()) {
+                ++newestFrameProjectionSuccess;
+              }
+            }
+          }
+
+          const char* cohort = "unknown";
+          if (originalBrightObservations > 0 && originalDarkObservations == 0 &&
+              unknownIntensityObservations == 0) {
+            cohort = "original_bright";
+          } else if (originalDarkObservations > 0 &&
+                     originalBrightObservations == 0 &&
+                     unknownIntensityObservations == 0) {
+            cohort = "original_dark";
+          }
+          const char* predictedPath = hasNewObservations
+                                          ? "drop_old_observations_keep_landmark"
+                                          : (marginalize && obsCount >= 2
+                                                 ? "marginalize_landmark"
+                                                 : "delete_after_observation_removal");
+          const bool losesFinalUsableObservation =
+              activeUsableObservations > 0 && survivingUsableObservations == 0;
+          const bool wouldRemainProjectable = newestFrameProjectionSuccess > 0;
+          const bool eligible =
+              survivingUsableObservations > 0 && wouldRemainProjectable;
+          const double observationSpan =
+              std::isfinite(oldestObservationTime) &&
+                      std::isfinite(newestObservationTime)
+                  ? newestObservationTime - oldestObservationTime
+                  : 0.0;
+          const double age = std::isfinite(newestObservationTime)
+                                 ? newestTimestamp.toSec() - newestObservationTime
+                                 : 0.0;
+
+          LOG(INFO) << std::setprecision(17)
+                    << "[RETENTION_ELIGIBILITY_DIAGNOSTIC]"
+                    << " landmark_id=" << pit->first
+                    << " remove_frame=" << removeFrames[k]
+                    << " remove_time_s=" << it->second.timestamp.toSec()
+                    << " newest_frame=" << newestFrameId
+                    << " newest_time_s=" << newestTimestamp.toSec()
+                    << " predicted_path=" << predictedPath
+                    << " cohort=" << cohort
+                    << " finite=1 initialized=1"
+                    << " active_observations=" << activeObservations
+                    << " active_distinct_frames=" << activeFrames.size()
+                    << " active_distinct_cameras=" << activeCameras.size()
+                    << " active_usable_observations=" << activeUsableObservations
+                    << " exact_residual_observations=" << exactResidualObservations
+                    << " invalid_residual_observations=" << invalidResidualObservations
+                    << " active_robust_cost=" << activeRobustCost
+                    << " surviving_observations=" << survivingObservations
+                    << " surviving_distinct_frames=" << survivingFrames.size()
+                    << " surviving_distinct_cameras=" << survivingCameras.size()
+                    << " surviving_positive_depth=" << survivingPositiveDepth
+                    << " surviving_usable_observations=" << survivingUsableObservations
+                    << " surviving_robust_cost=" << survivingRobustCost
+                    << " observation_span_s=" << observationSpan
+                    << " age_s=" << age
+                    << " max_parallax_deg=" << maximumParallaxDegrees
+                    << " ray_normal_relative_min=" << rayNormalRelativeMinimum
+                    << " newest_projection_success=" << newestFrameProjectionSuccess
+                    << " loses_final_usable_observation="
+                    << losesFinalUsableObservation
+                    << " would_remain_projectable=" << wouldRemainProjectable
+                    << " chi2_source=stored_residual_information"
+                    << " eligible=" << eligible;
+          ++retentionDiagnosticsEmitted;
+        }
+
+        if (retentionPolicyEnabled && !hasNewObservations &&
+            !retentionReleasedThisCall.count(pit->first) &&
+            retentionEligibilityComputed && retentionEligibility.eligible) {
+          const bool alreadyTracked =
+              retainedLandmarkFirstRetentionTime_.find(pit->first) !=
+              retainedLandmarkFirstRetentionTime_.end();
+          const bool perCallCapacityAvailable =
+              alreadyTracked ||
+              retentionPolicyNewlySelected < kMaximumNewRetentionsPerMarginalization;
+          const bool totalCapacityAvailable =
+              alreadyTracked ||
+              retainedLandmarkFirstRetentionTime_.size() < kMaximumTrackedRetentions;
+          if (!perCallCapacityAvailable || !totalCapacityAvailable) {
+            ++retentionPolicyCapacityRejected;
+            if (retentionDiagnosticWindow) {
+              LOG(INFO) << std::setprecision(17)
+                        << "[RETENTION_POLICY_DECISION]"
+                        << " landmark_id=" << pit->first
+                        << " remove_frame=" << removeFrames[k]
+                        << " decision=skip"
+                        << " reason="
+                        << (!perCallCapacityAvailable ? "per_call_limit" : "tracked_limit")
+                        << " surviving_usable_observations="
+                        << retentionEligibility.survivingUsableObservations
+                        << " newest_projection_success="
+                        << retentionEligibility.newestFrameProjectionSuccess
+                        << " age_s=" << retentionEligibility.newestObservationAge;
+            }
+          } else {
+            if (!alreadyTracked) {
+              retainedLandmarkFirstRetentionTime_.insert(
+                  std::make_pair(pit->first, retentionPolicyTimestamp));
+              ++retentionPolicyNewlySelected;
+            }
+            if (retentionDiagnosticWindow) {
+              LOG(INFO) << std::setprecision(17)
+                        << "[RETENTION_POLICY_DECISION]"
+                        << " landmark_id=" << pit->first
+                        << " remove_frame=" << removeFrames[k]
+                        << " decision=retain"
+                        << " newly_selected=" << (!alreadyTracked)
+                        << " surviving_usable_observations="
+                        << retentionEligibility.survivingUsableObservations
+                        << " newest_projection_success="
+                        << retentionEligibility.newestFrameProjectionSuccess
+                        << " age_s=" << retentionEligibility.newestObservationAge
+                        << " tracked_total="
+                        << retainedLandmarkFirstRetentionTime_.size();
+            }
+
+            // Drop every reprojection attached to a frame scheduled for
+            // removal.  The remaining genuine residuals stay explicit and
+            // therefore never enter the marginalization prior through this
+            // landmark path.
+            for (size_t r = 0; r < residuals.size(); ++r) {
+              std::shared_ptr<ceres::ReprojectionErrorBase> reprojectionError =
+                  std::dynamic_pointer_cast<ceres::ReprojectionErrorBase>(
+                      residuals[r].errorInterfacePtr);
+              if (!reprojectionError) continue;
+              const ceres::Map::ParameterBlockCollection residualParameters =
+                  mapPtr_->parameters(residuals[r].residualBlockId);
+              if (!residualParameters.empty() &&
+                  vectorContains(removeFrames, residualParameters[0].first)) {
+                if (removeObservation(residuals[r].residualBlockId)) {
+                  ++retentionPolicyRemovedObservations;
+                }
+              }
+            }
+            pit++;
+            continue;
+          }
+        } else if (retentionPolicyEnabled && !hasNewObservations &&
+                   !retentionReleasedThisCall.count(pit->first) &&
+                   !retentionTracked && !skipLandmark &&
+                   retentionEligibilityComputed && !retentionEligibility.eligible) {
+          ++retentionPolicyIneligible;
+          if (retentionDiagnosticWindow) {
+            const char* reason = "ineligible";
+            if (!retentionEligibility.finiteInitialized) {
+              reason = "invalid_point";
+            } else if (retentionEligibility.inExistingMarginalizationPrior) {
+              reason = "already_in_marginalization_prior";
+            } else if (!retentionEligibility.observationGraphValid ||
+                       retentionEligibility.hasRemovalNonReprojection) {
+              reason = "invalid_observation_graph";
+            } else if (retentionEligibility.survivingUsableObservations < 2) {
+              reason = "insufficient_surviving_support";
+            } else if (retentionEligibility.newestFrameProjectionSuccess == 0) {
+              reason = "not_projectable_in_newest_frame";
+            } else if (!std::isfinite(retentionEligibility.newestObservationAge) ||
+                       retentionEligibility.newestObservationAge < 0.0 ||
+                       retentionEligibility.newestObservationAge >
+                           kMaximumRetentionAgeSeconds) {
+              reason = "observation_too_old";
+            }
+            LOG(INFO) << std::setprecision(17)
+                      << "[RETENTION_POLICY_DECISION]"
+                      << " landmark_id=" << pit->first
+                      << " remove_frame=" << removeFrames[k]
+                      << " decision=skip"
+                      << " reason=" << reason
+                      << " surviving_usable_observations="
+                      << retentionEligibility.survivingUsableObservations
+                      << " newest_projection_success="
+                      << retentionEligibility.newestFrameProjectionSuccess
+                      << " age_s=" << retentionEligibility.newestObservationAge;
+          }
         }
 
         // so, we need to consider it.
@@ -748,12 +1459,36 @@ bool Estimator::applyMarginalizationStrategy(size_t numKeyframes,
         }
 
         if (justDelete) {
+          if (retentionDiagnosticsEnabled && retentionDiagnosticWindow) {
+            LOG(INFO) << std::setprecision(17)
+                      << "[RETENTION_TERMINAL_REMOVAL_DIAGNOSTIC]"
+                      << " landmark_id=" << pit->first
+                      << " remove_frame=" << removeFrames[k]
+                      << " remove_time_s=" << it->second.timestamp.toSec()
+                      << " newest_frame=" << statesMap_.rbegin()->first
+                      << " newest_time_s=" << statesMap_.rbegin()->second.timestamp.toSec()
+                      << " terminal_reason=all_residuals_deleted"
+                      << " observations_before=" << pit->second.observations.size();
+          }
+          releaseRetentionTracking(pit->first, "removed");
           mapPtr_->removeParameterBlock(pit->first);
           removedLandmarks.push_back(pit->second);
           pit = landmarksMap_.erase(pit);
           continue;
         }
         if (marginalize && errorTermAdded) {
+          if (retentionDiagnosticsEnabled && retentionDiagnosticWindow) {
+            LOG(INFO) << std::setprecision(17)
+                      << "[RETENTION_TERMINAL_REMOVAL_DIAGNOSTIC]"
+                      << " landmark_id=" << pit->first
+                      << " remove_frame=" << removeFrames[k]
+                      << " remove_time_s=" << it->second.timestamp.toSec()
+                      << " newest_frame=" << statesMap_.rbegin()->first
+                      << " newest_time_s=" << statesMap_.rbegin()->second.timestamp.toSec()
+                      << " terminal_reason=marginalized_with_error_term"
+                      << " observations_before=" << pit->second.observations.size();
+          }
+          releaseRetentionTracking(pit->first, "removed");
           paremeterBlocksToBeMarginalized.push_back(pit->first);
           keepParameterBlocks.push_back(false);
           removedLandmarks.push_back(pit->second);
@@ -793,7 +1528,10 @@ bool Estimator::applyMarginalizationStrategy(size_t numKeyframes,
     marginalizationErrorPtr_->getParameterBlockPtrs(parameterBlockPtrs);
     marginalizationResidualId_ = mapPtr_->addResidualBlock(marginalizationErrorPtr_, NULL, parameterBlockPtrs);
     OKVIS_ASSERT_TRUE_DBG(Exception, marginalizationResidualId_, "could not add marginalization error");
-    if (!marginalizationResidualId_) return false;
+    if (!marginalizationResidualId_) {
+      logRetentionPolicySummary();
+      return false;
+    }
   }
 
   if (reDoFixation) {
@@ -810,6 +1548,7 @@ bool Estimator::applyMarginalizationStrategy(size_t numKeyframes,
     mapPtr_->addResidualBlock(poseError, NULL, mapPtr_->parameterBlockPtr(statesMap_.begin()->first));
   }
 
+  logRetentionPolicySummary();
   return true;
 }
 

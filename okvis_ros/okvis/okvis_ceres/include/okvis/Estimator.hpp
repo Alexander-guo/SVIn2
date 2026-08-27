@@ -622,6 +622,10 @@ class Estimator : public VioBackendInterface {
   okvis::PointMap landmarksMap_;    ///< Contains all the current landmarks (synched after optimisation).
   mutable std::mutex statesMutex_;  ///< Regulate access of landmarksMap_.
 
+  // Opt-in bounded retention lifetime, keyed by landmark ID and first
+  // retention timestamp.  It is intentionally independent of MapPoint data.
+  std::map<uint64_t, double> retainedLandmarkFirstRetentionTime_;
+
   // parameters
   std::vector<okvis::ExtrinsicsEstimationParameters,
               Eigen::aligned_allocator<okvis::ExtrinsicsEstimationParameters>>

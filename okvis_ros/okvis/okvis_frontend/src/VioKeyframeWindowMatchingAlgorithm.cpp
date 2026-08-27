@@ -47,7 +47,10 @@
 // cameras and distortions
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
+#include <cstring>
 #include <Eigen/Eigenvalues>
+#include <iomanip>
 #include <map>
 #include <numeric>
 #include <set>
@@ -60,6 +63,20 @@
 #include <opencv2/features2d/features2d.hpp>  // for cv::KeyPoint
 /// \brief okvis Main namespace of this package.
 namespace okvis {
+
+namespace {
+
+bool retentionHammingProbeWindow(const okvis::Time& timestamp) {
+  const char* value = std::getenv("SVIN2_ENABLE_RETENTION_ELIGIBILITY_DIAGNOSTICS");
+  if (value == nullptr || std::strcmp(value, "1") != 0) return false;
+
+  const double seconds = timestamp.toSec();
+  return (seconds >= 11265.0 && seconds <= 11275.0) ||
+         (seconds >= 11281.0 && seconds <= 11291.0) ||
+         (seconds >= 11336.0 && seconds <= 11346.0);
+}
+
+}  // namespace
 
 // Constructor.
 // Sharmin: useSCM = false
@@ -168,6 +185,21 @@ void VioKeyframeWindowMatchingAlgorithm<CAMERA_GEOMETRY_T>::doSetup() {
   skipA_.clear();
   skipA_.resize(numA, false);
   raySigmasA_.resize(numA);
+  retentionHammingProbeEnabled_ =
+      matchingType_ == Match3D2D && retentionHammingProbeWindow(frameB_->timestamp());
+  retentionHammingProbes_.clear();
+  retentionHammingSourceLandmarkIds_.clear();
+  if (retentionHammingProbeEnabled_) {
+    retentionHammingSourceLandmarkIds_.assign(numA, 0);
+    retentionHammingProbes_.resize(numA);
+    for (size_t k = 0; k < numA; ++k) {
+      const uint64_t landmarkId = frameA_->landmarkId(camIdA_, k);
+      if (landmarkId != 0 && estimator_->isLandmarkAdded(landmarkId) &&
+          estimator_->isLandmarkInitialized(landmarkId)) {
+        retentionHammingSourceLandmarkIds_[k] = landmarkId;
+      }
+    }
+  }
   // calculate projections only once
   if (matchingType_ == Match3D2D) {
     // allocate a matrix to store projections
@@ -633,7 +665,44 @@ bool VioKeyframeWindowMatchingAlgorithm<CAMERA_GEOMETRY_T>::verifyMatch(size_t i
 // A function that tells you how many times setMatching() will be called.
 template <class CAMERA_GEOMETRY_T>
 void VioKeyframeWindowMatchingAlgorithm<CAMERA_GEOMETRY_T>::reserveMatches(size_t /*numMatches*/) {
-  // _triangulatedPoints.clear();
+  // DenseMatcher calls this only after waitForEmptyQueue(), so all per-source
+  // probe updates made by its workers are complete before this deterministic
+  // aggregation/logging pass.
+  if (!retentionHammingProbeEnabled_) return;
+
+  struct HammingAggregate {
+    uint32_t bestHamming = std::numeric_limits<uint32_t>::max();
+    size_t comparisonCount = 0;
+    size_t geometryPassCount = 0;
+    size_t sourceKeypointCount = 0;
+  };
+  std::map<uint64_t, HammingAggregate> aggregates;
+  for (size_t indexA = 0; indexA < retentionHammingProbes_.size(); ++indexA) {
+    const uint64_t landmarkId = retentionHammingSourceLandmarkIds_[indexA];
+    if (landmarkId == 0) continue;
+
+    HammingAggregate& aggregate = aggregates[landmarkId];
+    const RetentionHammingProbe& probe = retentionHammingProbes_[indexA];
+    aggregate.bestHamming = std::min(aggregate.bestHamming, probe.bestHamming);
+    aggregate.comparisonCount += probe.comparisonCount;
+    aggregate.geometryPassCount += probe.geometryPassCount;
+    ++aggregate.sourceKeypointCount;
+  }
+
+  const double newestFrameTime = frameB_ ? frameB_->timestamp().toSec() : 0.0;
+  for (const auto& entry : aggregates) {
+    const uint64_t landmarkId = entry.first;
+    const HammingAggregate& aggregate = entry.second;
+    const bool hasBest = aggregate.bestHamming != std::numeric_limits<uint32_t>::max();
+    LOG(INFO) << std::setprecision(17) << "[RETENTION_HAMMING_PROBE]"
+              << " newest_frame_id=" << mfIdB_ << " newest_frame_time_s=" << newestFrameTime
+              << " landmark_id=" << landmarkId
+              << " source_keypoint_count=" << aggregate.sourceKeypointCount
+              << " comparison_count=" << aggregate.comparisonCount
+              << " best_hamming=" << (hasBest ? static_cast<int>(aggregate.bestHamming) : -1)
+              << " best_hamming_lt_60=" << (hasBest && aggregate.bestHamming < 60)
+              << " geometry_pass_count=" << aggregate.geometryPassCount;
+  }
 }
 
 // Get the number of matches.
@@ -674,7 +743,7 @@ size_t VioKeyframeWindowMatchingAlgorithm<CAMERA_GEOMETRY_T>::numActivePendingTr
 template <class CAMERA_GEOMETRY_T>
 void VioKeyframeWindowMatchingAlgorithm<CAMERA_GEOMETRY_T>::setBestMatch(size_t indexA,
                                                                          size_t indexB,
-                                                                         double /*distance*/) {
+                                                                         double distance) {
   // assign correspondences
   uint64_t lmIdA = frameA_->landmarkId(camIdA_, indexA);
   uint64_t lmIdB = frameB_->landmarkId(camIdB_, indexB);
@@ -765,6 +834,14 @@ void VioKeyframeWindowMatchingAlgorithm<CAMERA_GEOMETRY_T>::setBestMatch(size_t 
       OKVIS_ASSERT_TRUE(Exception, estimator_->isLandmarkAdded(lmIdB), "not added");
       estimator_->addObservation<camera_geometry_t>(lmIdB, mfIdB_, camIdB_, indexB);
     }
+  }
+  if (retentionHammingProbeEnabled_ && matchingType_ == Match3D2D && lmIdA != 0) {
+    const double newestFrameTime = frameB_ ? frameB_->timestamp().toSec() : 0.0;
+    LOG(INFO) << std::setprecision(17) << "[RETENTION_HAMMING_SELECTED]"
+              << " newest_frame_id=" << mfIdB_ << " newest_frame_time_s=" << newestFrameTime
+              << " landmark_id=" << lmIdA << " source_keypoint_index=" << indexA
+              << " target_camera_index=" << camIdB_ << " target_keypoint_index=" << indexB
+              << " selected_distance=" << distance;
   }
   numMatches_++;
   /*if (useSCM_) // Added by Sharmin
