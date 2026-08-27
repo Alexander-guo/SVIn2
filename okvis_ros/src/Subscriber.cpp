@@ -72,6 +72,10 @@ Subscriber::Subscriber(std::shared_ptr<rclcpp::Node> node,
   param_reader.getParameters(vioParameters_);
 
   imageSubscribers_.resize(vioParameters_.nCameraSystem.numCameras());
+  imagePreprocessors_.reserve(vioParameters_.nCameraSystem.numCameras());
+  for (size_t cameraIndex = 0; cameraIndex < vioParameters_.nCameraSystem.numCameras(); ++cameraIndex) {
+    imagePreprocessors_.emplace_back(std::make_unique<ImagePreprocessor>(vioParameters_.histogramParams));
+  }
   lastImageDiagnosticSecond_.assign(vioParameters_.nCameraSystem.numCameras(),
                                     std::numeric_limits<int64_t>::min());
 
@@ -119,16 +123,9 @@ Subscriber::Subscriber(std::shared_ptr<rclcpp::Node> node,
 
   imgLeftCounter = 0;   // @Sharmin
   imgRightCounter = 0;  // @Sharmin
-  // Added by Sharmin
-  if (vioParameters_.histogramParams.histogramMethod == HistogramMethod::CLAHE) {
-    clahe = cv::createCLAHE();
-    clahe->setClipLimit(vioParameters_.histogramParams.claheClipLimit);
-    clahe->setTilesGridSize(
-        cv::Size(vioParameters_.histogramParams.claheTilesGridSize, vioParameters_.histogramParams.claheTilesGridSize));
-
-    std::cout << "Set Clahe Params " << vioParameters_.histogramParams.claheClipLimit << " "
-              << vioParameters_.histogramParams.claheTilesGridSize << std::endl;
-  }
+  std::cout << "Image preprocessing method " << static_cast<int>(vioParameters_.histogramParams.histogramMethod)
+            << ", CLAHE clip/grid " << vioParameters_.histogramParams.claheClipLimit << "/"
+            << vioParameters_.histogramParams.claheTilesGridSize << std::endl;
 
   // Watchdog: parameter and timer setup (uses steady clock)
   try {
@@ -171,16 +168,9 @@ void Subscriber::imageCallback(const sensor_msgs::msg::Image::ConstSharedPtr msg
     filtered = raw_resized.clone();
   }
 
-  // Added by Sharmin for CLAHE
   cv::Mat histogram_equalized_image;
-  if (vioParameters_.histogramParams.histogramMethod == HistogramMethod::CLAHE) {
-    clahe->apply(filtered, histogram_equalized_image);
-  } else if (vioParameters_.histogramParams.histogramMethod == HistogramMethod::HISTOGRAM) {
-    cv::equalizeHist(filtered, histogram_equalized_image);
-  } else {
-    histogram_equalized_image = filtered;
-  }
-  // End Added by Sharmin
+  OKVIS_ASSERT_TRUE(Exception, cameraIndex < imagePreprocessors_.size(), "Camera preprocessor index out of range");
+  imagePreprocessors_[cameraIndex]->apply(filtered, histogram_equalized_image);
 
   // adapt timestamp
   okvis::Time t(msg->header.stamp.sec, msg->header.stamp.nanosec);

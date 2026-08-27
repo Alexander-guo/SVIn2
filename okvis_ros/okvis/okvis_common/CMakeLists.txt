@@ -12,8 +12,10 @@ include_directories(${OpenCV_INCLUDE_DIRS})
 
 # build the library
 add_library(${PROJECT_NAME} STATIC 
+  src/ImagePreprocessor.cpp
   src/VioInterface.cpp
   src/VioParametersReader.cpp
+  include/okvis/ImagePreprocessor.hpp
   include/okvis/FrameTypedefs.hpp
   include/okvis/Measurements.hpp
   include/okvis/Parameters.hpp
@@ -41,6 +43,14 @@ install(DIRECTORY include/ DESTINATION ${INSTALL_INCLUDE_DIR} COMPONENT dev FILE
 
 if(BUILD_TESTS)
   enable_testing()
+  add_executable(${PROJECT_NAME}_test test/TestImagePreprocessor.cpp)
+  target_link_libraries(${PROJECT_NAME}_test
+    ${PROJECT_NAME}
+    gtest
+    gtest_main
+    pthread)
+  add_test(NAME ${PROJECT_NAME}_test COMMAND ${PROJECT_NAME}_test)
+
   add_executable(okvis_detection_parameters_test test/TestDetectionParameters.cpp)
   target_compile_definitions(okvis_detection_parameters_test PRIVATE
     OKVIS_TEST_X5_CONFIG="${CMAKE_CURRENT_SOURCE_DIR}/../../../config/config_insta360X5_front_ds_air.yaml")

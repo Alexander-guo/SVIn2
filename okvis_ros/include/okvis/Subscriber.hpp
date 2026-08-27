@@ -68,6 +68,7 @@
 #include <geometry_msgs/msg/point_stamped.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <okvis/Publisher.hpp>
+#include <okvis/ImagePreprocessor.hpp>
 #include <okvis/ThreadedKFVio.hpp>
 #include <okvis/Time.hpp>
 #include <okvis/VioInterface.hpp>
@@ -146,7 +147,7 @@ class Subscriber {
   // ros::Subscriber subDepth_;                                     ///< The Depth Subscriber @Sharmin
   rclcpp::Subscription<sensor_msgs::msg::PointCloud>::SharedPtr
       subReloPoints_;        ///< The Relocalization Points Subscriber from pose_graph @Sharmin
-  cv::Ptr<cv::CLAHE> clahe;  /// Sharmin
+  std::vector<std::unique_ptr<ImagePreprocessor>> imagePreprocessors_;
   std::mutex imageDiagnosticsMutex_;
   std::vector<int64_t> lastImageDiagnosticSecond_;
   /// @}
