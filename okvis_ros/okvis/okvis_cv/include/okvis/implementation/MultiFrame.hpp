@@ -101,6 +101,11 @@ void MultiFrame::setImage(size_t cameraIdx, const cv::Mat& image) {
   frames_[cameraIdx].setImage(image);
 }
 
+void MultiFrame::setPreHistogramImage(size_t cameraIdx, const cv::Mat& image) {
+  OKVIS_ASSERT_TRUE_DBG(Exception, cameraIdx < frames_.size(), "Out of range");
+  frames_[cameraIdx].setPreHistogramImage(image);
+}
+
 // Set the geometry
 void MultiFrame::setGeometry(size_t cameraIdx, std::shared_ptr<const cameras::CameraBase> cameraGeometry) {
   OKVIS_ASSERT_TRUE_DBG(Exception, cameraIdx < frames_.size(), "Out of range");
@@ -236,6 +241,11 @@ bool MultiFrame::resetKeypoints(size_t cameraIdx, const std::vector<cv::KeyPoint
 bool MultiFrame::resetDescriptors(size_t cameraIdx, const cv::Mat& descriptors) {
   OKVIS_ASSERT_TRUE_DBG(Exception, cameraIdx < frames_.size(), "Out of range");
   return frames_[cameraIdx].resetDescriptors(descriptors);
+}
+
+uint8_t MultiFrame::keypointIntensityFlags(size_t cameraIdx, size_t keypointIdx) const {
+  OKVIS_ASSERT_TRUE_DBG(Exception, cameraIdx < frames_.size(), "Out of range");
+  return frames_[cameraIdx].keypointIntensityFlags(keypointIdx);
 }
 
 //

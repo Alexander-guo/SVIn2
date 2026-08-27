@@ -265,10 +265,15 @@ void Subscriber::imageCallback(const sensor_msgs::msg::Image::ConstSharedPtr msg
 
   //TODO(Guo): Investigate if frames are actually dropped,
   // the warning becomes more and more frequent all the time as okvis proceeds.
-  if (!vioInterface_->addImage(t, cameraIndex, histogram_equalized_image)) {
-    // Non-blocking queue mode: the newest frame was accepted, but the oldest queued frame was evicted.
-    LOG(WARNING) << "Camera input queue overflow at t=" << t
-                 << ": dropped oldest queued frame to enqueue latest frame.";
+  // The optional pre-histogram image is retained only on the opt-in diagnostic
+  // path and is collapsed to one byte per surviving keypoint after description.
+  const cv::Mat preHistogramDiagnosticImage = driftDiagnosticsOptIn() ? filtered : cv::Mat();
+  if (!vioInterface_->addImage(
+          t, cameraIndex, histogram_equalized_image, nullptr, nullptr, preHistogramDiagnosticImage)) {
+    // addImage(false) is deliberately reported neutrally: it can mean that this
+    // image was rejected as stale or that an older queued image was evicted.
+    LOG(WARNING) << "VIO camera input loss at t=" << t
+                 << ": current image rejected or an older queued image evicted.";
   }
 }
 

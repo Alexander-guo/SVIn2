@@ -130,7 +130,8 @@ class ThreadedKFVio : public VioInterface {
                         size_t cameraIndex,
                         const cv::Mat& image,
                         const std::vector<cv::KeyPoint>* keypoints = 0,
-                        bool* asKeyframe = 0);
+                        bool* asKeyframe = 0,
+                        const cv::Mat& preHistogramImage = cv::Mat());
 
   /**
    * \brief             Add an abstracted image observation.

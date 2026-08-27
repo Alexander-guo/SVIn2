@@ -40,6 +40,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <memory>
@@ -81,7 +82,16 @@ Frame::Frame(const cv::Mat& image,
     : image_(image), cameraGeometry_(cameraGeometry), detector_(detector), extractor_(extractor) {}
 
 // set the frame image;
-void Frame::setImage(const cv::Mat& image) { image_ = image; }
+void Frame::setImage(const cv::Mat& image) {
+  image_ = image;
+  preHistogramImage_.release();
+  keypointIntensityFlags_.clear();
+}
+
+void Frame::setPreHistogramImage(const cv::Mat& image) {
+  preHistogramImage_ = image;
+  keypointIntensityFlags_.clear();
+}
 
 // set the geometry
 void Frame::setGeometry(std::shared_ptr<const cameras::CameraBase> cameraGeometry) { cameraGeometry_ = cameraGeometry; }
@@ -119,6 +129,7 @@ int Frame::detect() {
   keypoints_.clear();
   descriptors_.resize(0);
   landmarkIds_.clear();  // resizing and filling in zeros in Frame::describe() as some keypoints are removed there.
+  keypointIntensityFlags_.clear();
 
   // run the detector
   OKVIS_ASSERT_TRUE_DBG(Exception, detector_ != NULL, "Detector not initialised!");
@@ -156,6 +167,7 @@ int Frame::describe(const Eigen::Vector3d& extractionDirection) {
   extractor_->compute(image_, keypoints_, descriptors_);
   landmarkIds_ = std::vector<uint64_t>(keypoints_.size(), 0);
   canonicalizeFeatureOrder();
+  finalizeKeypointIntensityMetadata();
   return keypoints_.size();
 }
 // describe keypoints. This uses virtual function calls.
@@ -188,6 +200,7 @@ int Frame::describeAs(const Eigen::Vector3d& extractionDirection) {
   // extraction
   extractor_->compute(image_, keypoints_, descriptors_);
   canonicalizeFeatureOrder();
+  finalizeKeypointIntensityMetadata();
   return keypoints_.size();
 }
 
@@ -310,6 +323,7 @@ uint64_t Frame::landmarkId(size_t keypointIdx) const {
 inline bool Frame::resetKeypoints(const std::vector<cv::KeyPoint>& keypoints) {
   keypoints_ = keypoints;
   landmarkIds_ = std::vector<uint64_t>(keypoints_.size(), 0);
+  keypointIntensityFlags_.clear();
   return true;
 }
 
@@ -317,6 +331,47 @@ inline bool Frame::resetKeypoints(const std::vector<cv::KeyPoint>& keypoints) {
 inline bool Frame::resetDescriptors(const cv::Mat& descriptors) {
   descriptors_ = descriptors;
   return true;
+}
+
+uint8_t Frame::keypointIntensityFlags(size_t keypointIdx) const {
+  if (keypointIdx >= keypointIntensityFlags_.size()) return 0;
+  return keypointIntensityFlags_[keypointIdx];
+}
+
+void Frame::finalizeKeypointIntensityMetadata() {
+  constexpr int kPatchRadius = 4;
+  constexpr double kDarkMeanThreshold = 32.0;
+  if (preHistogramImage_.empty() || preHistogramImage_.size() != image_.size()) {
+    keypointIntensityFlags_.clear();
+    preHistogramImage_.release();
+    return;
+  }
+  keypointIntensityFlags_.assign(keypoints_.size(), 0);
+  const auto classify = [](const cv::Mat& image, const cv::KeyPoint& keypoint, uint8_t validFlag,
+                           uint8_t darkFlag) {
+    uint8_t result = 0;
+    if (image.empty() || !std::isfinite(keypoint.pt.x) || !std::isfinite(keypoint.pt.y)) return result;
+    const int centerX = cvRound(keypoint.pt.x);
+    const int centerY = cvRound(keypoint.pt.y);
+    const int x0 = std::max(0, centerX - kPatchRadius);
+    const int y0 = std::max(0, centerY - kPatchRadius);
+    const int x1 = std::min(image.cols, centerX + kPatchRadius + 1);
+    const int y1 = std::min(image.rows, centerY + kPatchRadius + 1);
+    if (x0 >= x1 || y0 >= y1) return result;
+    cv::Mat gray;
+    const cv::Mat patch = image(cv::Rect(x0, y0, x1 - x0, y1 - y0));
+    if (patch.channels() == 1) gray = patch;
+    else cv::cvtColor(patch, gray, cv::COLOR_BGR2GRAY);
+    result |= validFlag;
+    if (cv::mean(gray)[0] < kDarkMeanThreshold) result |= darkFlag;
+    return result;
+  };
+  for (size_t index = 0; index < keypoints_.size(); ++index) {
+    uint8_t flags = classify(image_, keypoints_[index], PostHistogramIntensityValid, PostHistogramDark);
+    flags |= classify(preHistogramImage_, keypoints_[index], PreHistogramIntensityValid, PreHistogramDark);
+    keypointIntensityFlags_[index] = flags;
+  }
+  preHistogramImage_.release();
 }
 
 void Frame::canonicalizeFeatureOrder() {
@@ -350,6 +405,10 @@ void Frame::canonicalizeFeatureOrder() {
   sortedKeypoints.reserve(keypoints_.size());
   std::vector<uint64_t> sortedLandmarkIds;
   if (landmarkIds_.size() == keypoints_.size()) sortedLandmarkIds.reserve(landmarkIds_.size());
+  std::vector<uint8_t> sortedIntensityFlags;
+  if (keypointIntensityFlags_.size() == keypoints_.size()) {
+    sortedIntensityFlags.reserve(keypointIntensityFlags_.size());
+  }
 
   cv::Mat sortedDescriptors;
   if (descriptorsAligned) {
@@ -362,6 +421,9 @@ void Frame::canonicalizeFeatureOrder() {
     if (!sortedLandmarkIds.empty() || landmarkIds_.size() == keypoints_.size()) {
       sortedLandmarkIds.push_back(landmarkIds_[originalIndex]);
     }
+    if (!sortedIntensityFlags.empty() || keypointIntensityFlags_.size() == keypoints_.size()) {
+      sortedIntensityFlags.push_back(keypointIntensityFlags_[originalIndex]);
+    }
     if (descriptorsAligned) {
       descriptors_.row(static_cast<int>(originalIndex)).copyTo(sortedDescriptors.row(static_cast<int>(sortedIndex)));
     }
@@ -369,6 +431,9 @@ void Frame::canonicalizeFeatureOrder() {
 
   keypoints_.swap(sortedKeypoints);
   if (landmarkIds_.size() == keypoints_.size()) landmarkIds_.swap(sortedLandmarkIds);
+  if (keypointIntensityFlags_.size() == keypoints_.size()) {
+    keypointIntensityFlags_.swap(sortedIntensityFlags);
+  }
   if (descriptorsAligned) descriptors_ = sortedDescriptors;
 }
 

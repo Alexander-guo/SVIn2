@@ -322,7 +322,8 @@ bool ThreadedKFVio::addImage(const okvis::Time& stamp,
                              size_t cameraIndex,
                              const cv::Mat& image,
                              const std::vector<cv::KeyPoint>* keypoints,
-                             bool* /*asKeyframe*/) {
+                             bool* /*asKeyframe*/,
+                             const cv::Mat& preHistogramImage) {
   assert(cameraIndex < numCameras_);
 
   if (lastAddedImageTimestamp_ > stamp &&
@@ -334,6 +335,7 @@ bool ThreadedKFVio::addImage(const okvis::Time& stamp,
 
   std::shared_ptr<okvis::CameraMeasurement> frame = std::make_shared<okvis::CameraMeasurement>();
   frame->measurement.image = image;
+  frame->measurement.preHistogramImage = preHistogramImage;
   frame->timeStamp = stamp;
   frame->sensorId = cameraIndex;
 

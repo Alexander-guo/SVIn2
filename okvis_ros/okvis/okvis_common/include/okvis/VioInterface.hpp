@@ -140,6 +140,8 @@ class VioInterface {
    * \param image        The image.
    * \param keypoints    Optionally aready pass keypoints. This will skip the detection part.
    * \param asKeyframe   Use the new image as keyframe. Not implemented.
+   * \param preHistogramImage Optional resized/median-filtered image used only
+   *                          for compact diagnostic keypoint attribution.
    * \warning The frame consumer loop does not support using existing keypoints yet.
    * \warning Already specifying whether this frame should be a keyframe is not implemented yet.
    * \return             Returns true normally. False, if the previous one has not been processed yet.
@@ -148,7 +150,8 @@ class VioInterface {
                         size_t cameraIndex,
                         const cv::Mat& image,
                         const std::vector<cv::KeyPoint>* keypoints = 0,
-                        bool* asKeyframe = 0) = 0;
+                        bool* asKeyframe = 0,
+                        const cv::Mat& preHistogramImage = cv::Mat()) = 0;
 
   /**
    * \brief             Add an abstracted image observation.

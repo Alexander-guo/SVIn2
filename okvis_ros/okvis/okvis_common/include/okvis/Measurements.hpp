@@ -175,6 +175,7 @@ typedef std::deque<ImuMeasurement, Eigen::aligned_allocator<ImuMeasurement> > Im
 /// \brief Camera measurement.
 struct CameraData {
   cv::Mat image;                        ///< Image.
+  cv::Mat preHistogramImage;  ///< Optional resized/median-filtered image for diagnostic provenance.
   std::vector<cv::KeyPoint> keypoints;  ///< Keypoints if available.
   bool deliversKeypoints;               ///< Are the keypoints delivered too?
 };

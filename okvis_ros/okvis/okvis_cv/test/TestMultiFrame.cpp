@@ -95,3 +95,51 @@ TEST(MulitFrame, functions) {
     multiFrame.describe(c);
   }
 }
+
+TEST(MulitFrame, PreHistogramIntensityFlagsStayAlignedAfterCanonicalDescription) {
+  using Camera = okvis::cameras::PinholeCamera<okvis::cameras::NoDistortion>;
+  const std::shared_ptr<const okvis::cameras::CameraBase> camera = Camera::createTestObject();
+  std::vector<std::shared_ptr<const okvis::cameras::CameraBase>> cameras{camera};
+  std::vector<okvis::cameras::NCameraSystem::DistortionType> distortions{
+      okvis::cameras::NCameraSystem::NoDistortion};
+  std::vector<std::shared_ptr<const okvis::kinematics::Transformation>> extrinsics{
+      std::make_shared<const okvis::kinematics::Transformation>()};
+  okvis::cameras::NCameraSystem system(extrinsics, cameras, distortions, true);
+  okvis::MultiFrame frame(system, okvis::Time::now(), 1);
+
+  cv::Mat production(camera->imageHeight(), camera->imageWidth(), CV_8UC1, cv::Scalar(100));
+  cv::Mat original = production.clone();
+  const cv::Point originalDarkPoint(100, 100);
+  const cv::Point currentDarkPoint(300, 100);
+  original(cv::Rect(originalDarkPoint.x - 4, originalDarkPoint.y - 4, 9, 9)).setTo(10);
+  production(cv::Rect(currentDarkPoint.x - 4, currentDarkPoint.y - 4, 9, 9)).setTo(10);
+
+  std::shared_ptr<cv::DescriptorExtractor> extractor(new cv::BriskDescriptorExtractor(true, false));
+  frame.setExtractor(0, extractor);
+  frame.setImage(0, production);
+  frame.setPreHistogramImage(0, original);
+  ASSERT_TRUE(frame.resetKeypoints(
+      0, {cv::KeyPoint(currentDarkPoint, 12.0f), cv::KeyPoint(originalDarkPoint, 12.0f)}));
+  ASSERT_EQ(frame.describe(0), 2);
+
+  bool sawOriginalDark = false;
+  bool sawCurrentDark = false;
+  for (size_t index = 0; index < frame.numKeypoints(0); ++index) {
+    cv::KeyPoint keypoint;
+    ASSERT_TRUE(frame.getCvKeypoint(0, index, keypoint));
+    const uint8_t flags = frame.keypointIntensityFlags(0, index);
+    EXPECT_NE(flags & okvis::Frame::PreHistogramIntensityValid, 0);
+    EXPECT_NE(flags & okvis::Frame::PostHistogramIntensityValid, 0);
+    if (cvRound(keypoint.pt.x) == originalDarkPoint.x) {
+      EXPECT_NE(flags & okvis::Frame::PreHistogramDark, 0);
+      EXPECT_EQ(flags & okvis::Frame::PostHistogramDark, 0);
+      sawOriginalDark = true;
+    } else if (cvRound(keypoint.pt.x) == currentDarkPoint.x) {
+      EXPECT_EQ(flags & okvis::Frame::PreHistogramDark, 0);
+      EXPECT_NE(flags & okvis::Frame::PostHistogramDark, 0);
+      sawCurrentDark = true;
+    }
+  }
+  EXPECT_TRUE(sawOriginalDark);
+  EXPECT_TRUE(sawCurrentDark);
+}

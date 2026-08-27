@@ -54,6 +54,7 @@
 #pragma GCC diagnostic pop
 #include <okvis/Time.hpp>
 #include <okvis/assert_macros.hpp>
+#include <cstdint>
 #include <vector>
 
 #include "okvis/cameras/CameraBase.hpp"
@@ -88,6 +89,10 @@ class Frame {
   /// \brief Set the frame image;
   /// @param[in] image The image.
   inline void setImage(const cv::Mat& image);
+
+  /// Preserve the resized/median-filtered image only until description so
+  /// intensity provenance can be collapsed into compact per-keypoint flags.
+  inline void setPreHistogramImage(const cv::Mat& image);
 
   /// \brief Set the geometry
   /// @param[in] cameraGeometry The camera geometry.
@@ -182,6 +187,17 @@ class Frame {
   /// \return whether or not the operation was successful.
   inline bool resetDescriptors(const cv::Mat& descriptors);
 
+  enum KeypointIntensityFlag : uint8_t {
+    PostHistogramIntensityValid = 1u << 0,
+    PostHistogramDark = 1u << 1,
+    PreHistogramIntensityValid = 1u << 2,
+    PreHistogramDark = 1u << 3,
+  };
+
+  /// Return immutable intensity provenance aligned with the surviving,
+  /// canonicalized keypoint/descriptor row.
+  inline uint8_t keypointIntensityFlags(size_t keypointIdx) const;
+
   /// \brief Canonicalize the keypoint/descriptor handoff order.
   ///
   /// Rows are ordered only by immutable keypoint bit patterns and descriptor
@@ -209,6 +225,9 @@ class Frame {
   cv::Mat descriptors_;                                 ///< we store the descriptors using OpenCV's matrices
   cv::Mat contour_descriptors_;                         /// Sharmin: descriptor for keypoints on the contours
   std::vector<uint64_t> landmarkIds_;                   ///< landmark Id, if associated -- 0 otherwise
+  cv::Mat preHistogramImage_;  ///< transient resized/median-filtered image; released after description
+  std::vector<uint8_t> keypointIntensityFlags_;  ///< one byte per surviving canonical keypoint
+  inline void finalizeKeypointIntensityMetadata();
   // std::vector<uint64_t> contour_landmarkIds_;  /// Sharmin: contour landmark Id, if associated -- 0 otherwise
 };
 

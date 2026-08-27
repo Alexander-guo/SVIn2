@@ -113,6 +113,10 @@ class MultiFrame {
   /// @param[in] image The image.
   inline void setImage(size_t cameraIdx, const cv::Mat& image);
 
+  /// Set the resized/median-filtered image used only to derive compact
+  /// per-keypoint pre-histogram intensity provenance during description.
+  inline void setPreHistogramImage(size_t cameraIdx, const cv::Mat& image);
+
   /// \brief Set the geometry
   /// @param[in] cameraIdx The camera index.
   /// @param[in] cameraGeometry The camera geometry.
@@ -229,6 +233,9 @@ class MultiFrame {
   /// @param[in] descriptors A vector of descriptors.
   /// \return whether or not the operation was successful.
   inline bool resetDescriptors(size_t cameraIdx, const cv::Mat& descriptors);
+
+  /// Access the compact intensity flags for a surviving keypoint.
+  inline uint8_t keypointIntensityFlags(size_t cameraIdx, size_t keypointIdx) const;
 
   /// \brief the number of keypoints
   /// @param[in] cameraIdx The camera index.
