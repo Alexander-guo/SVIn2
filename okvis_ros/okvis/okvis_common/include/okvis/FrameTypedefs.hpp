@@ -174,8 +174,20 @@ struct Observation {
         keypointSize(keypointSize),
         landmark_W(landmark_W),
         landmarkId(landmarkId),
-        isInitialized(isInitialized) {}
-  Observation() : keypointIdx(0), cameraIdx(-1), frameId(0), keypointSize(0), landmarkId(0), isInitialized(false) {}
+        isInitialized(isInitialized),
+        landmarkInGraph(false),
+        activeWindowOccurrences(0),
+        activeWindowDistinctFrames(0) {}
+  Observation()
+      : keypointIdx(0),
+        cameraIdx(-1),
+        frameId(0),
+        keypointSize(0),
+        landmarkId(0),
+        isInitialized(false),
+        landmarkInGraph(false),
+        activeWindowOccurrences(0),
+        activeWindowDistinctFrames(0) {}
   size_t keypointIdx;                   ///< Keypoint ID.
   size_t cameraIdx;                     ///< index of the camera this point is observed in
   uint64_t frameId;                     ///< unique pose block ID == multiframe ID
@@ -184,8 +196,25 @@ struct Observation {
   Eigen::Vector4d landmark_W;  ///< landmark as homogeneous point in body frame B
   uint64_t landmarkId;         ///< unique landmark ID
   bool isInitialized;          ///< Initialisation status of landmark
+  /// True when landmarkId resolves to an estimator graph landmark. Pending
+  /// feature IDs deliberately remain outside the graph.
+  bool landmarkInGraph;
+  /// Number of distinct frame/camera images carrying this pending ID in the
+  /// active estimator window. Computed under the estimator lock.
+  size_t activeWindowOccurrences;
+  /// Number of distinct frames carrying this pending ID in the active window.
+  /// Two or more frames define a genuine temporal pending track.
+  size_t activeWindowDistinctFrames;
 };
 typedef std::vector<Observation, Eigen::aligned_allocator<Observation>> ObservationVector;
+
+/// A nonzero pending ID is only a temporal track after it has appeared in at
+/// least two distinct frames. A graph landmark is already a genuine tracked
+/// association regardless of its current initialization state.
+inline bool observationIsGenuinelyTracked(const Observation& observation) {
+  return observation.landmarkId != 0 &&
+         (observation.landmarkInGraph || observation.activeWindowDistinctFrames >= 2);
+}
 
 // todo: find a better place for this
 typedef Eigen::Matrix<double, 9, 1> SpeedAndBiases;

@@ -68,6 +68,7 @@ if(BUILD_TESTS)
 
   add_executable(${PROJECT_NAME}_deterministic_feature_handoff_test
     ../okvis_frontend/test/TestDeterministicFeatureHandoff.cpp
+    test/VioVisualizer_test.cpp
   )
   target_link_libraries(${PROJECT_NAME}_deterministic_feature_handoff_test
     gtest

@@ -49,6 +49,7 @@
 
 // cameras and distortions
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <iomanip>
 #include <memory>
@@ -75,6 +76,66 @@ VioVisualizer::~VioVisualizer() {}
 void VioVisualizer::init(okvis::VioParameters& parameters) {
   parameters_ = parameters;
   diagnosticFrameCounters_.assign(parameters_.nCameraSystem.numCameras(), 0);
+}
+
+cv::Scalar VioVisualizer::observationColor(const okvis::Observation& observation) {
+  if (observation.landmarkId == 0) return cv::Scalar(0, 0, 255);  // red: unassociated
+  if (!observation.landmarkInGraph) {
+    if (observation.activeWindowDistinctFrames >= 2) {
+      return cv::Scalar(255, 0, 0);  // blue: genuine temporal pending track
+    }
+    return cv::Scalar(0, 165, 255);  // orange: singleton/non-temporal pending ID
+  }
+  if (observation.isInitialized && observation.landmark_W.allFinite() &&
+      std::abs(observation.landmark_W[3]) > 1.0e-8) {
+    return cv::Scalar(0, 255, 0);  // green: initialized finite graph landmark
+  }
+  return cv::Scalar(0, 255, 255);  // yellow: graph landmark not finite/initialized
+}
+
+void VioVisualizer::alphaBlendRectangle(cv::Mat& image,
+                                        const cv::Rect& rectangle,
+                                        const cv::Scalar& color,
+                                        double opacity) {
+  if (image.empty()) return;
+  const cv::Rect bounds(0, 0, image.cols, image.rows);
+  const cv::Rect clipped = rectangle & bounds;
+  if (clipped.empty()) return;
+  const double alpha = std::clamp(opacity, 0.0, 1.0);
+  cv::Mat roi = image(clipped);
+  cv::Mat overlay(roi.size(), roi.type(), color);
+  cv::addWeighted(overlay, alpha, roi, 1.0 - alpha, 0.0, roi);
+}
+
+void VioVisualizer::drawObservationLegend(cv::Mat& image) {
+  if (image.empty()) return;
+  const std::array<std::pair<const char*, cv::Scalar>, 5> entries{{
+      {"unassociated", cv::Scalar(0, 0, 255)},
+      {"singleton", cv::Scalar(0, 165, 255)},
+      {"pending multi-frame", cv::Scalar(255, 0, 0)},
+      {"graph uninitialized/nonfinite", cv::Scalar(0, 255, 255)},
+      {"initialized finite", cv::Scalar(0, 255, 0)},
+  }};
+  constexpr int kWidth = 230;
+  constexpr int kLineHeight = 17;
+  constexpr int kPadding = 6;
+  const int height = kPadding * 2 + static_cast<int>(entries.size()) * kLineHeight;
+  const int x = std::max(0, image.cols - kWidth - kPadding);
+  const int y = std::max(0, image.rows - height - kPadding);
+  const cv::Rect box(x, y, std::min(kWidth, image.cols - x), std::min(height, image.rows - y));
+  alphaBlendRectangle(image, box, cv::Scalar::all(0), 0.4);
+  for (size_t index = 0; index < entries.size(); ++index) {
+    const int baseline = y + kPadding + 11 + static_cast<int>(index) * kLineHeight;
+    cv::circle(image, cv::Point(x + 10, baseline - 3), 4, entries[index].second, -1, cv::LINE_AA);
+    cv::putText(image,
+                entries[index].first,
+                cv::Point(x + 20, baseline),
+                cv::FONT_HERSHEY_SIMPLEX,
+                0.38,
+                cv::Scalar(255, 255, 255),
+                1,
+                cv::LINE_AA);
+  }
 }
 
 cv::Mat VioVisualizer::drawMatches(VisualizationData::Ptr& data, size_t image_number) {
@@ -158,7 +219,10 @@ cv::Mat VioVisualizer::drawMatches(VisualizationData::Ptr& data, size_t image_nu
 
     constexpr int kLineHeight = 18;
     const int boxHeight = static_cast<int>(lines.size()) * kLineHeight + 8;
-    cv::rectangle(image, cv::Rect(0, 0, image.cols, std::min(boxHeight, image.rows)), cv::Scalar(0, 0, 0), -1);
+    alphaBlendRectangle(image,
+                        cv::Rect(0, 0, image.cols, std::min(boxHeight, image.rows)),
+                        cv::Scalar::all(0),
+                        0.4);
     for (size_t index = 0; index < lines.size(); ++index) {
       cv::putText(image,
                   lines[index],
@@ -192,6 +256,7 @@ cv::Mat VioVisualizer::drawMatches(VisualizationData::Ptr& data, size_t image_nu
     cv::Mat currentDisplay;
     toDisplayImage(currentImage, currentDisplay, currentWidth);
     annotateDiagnostics(currentDisplay);
+    drawObservationLegend(currentDisplay);
     return currentDisplay;
   }
 
@@ -233,23 +298,12 @@ cv::Mat VioVisualizer::drawMatches(VisualizationData::Ptr& data, size_t image_nu
   for (auto it = data->observations.begin(); it != data->observations.end(); ++it) {
     if (it->cameraIdx != image_number) continue;
 
-    cv::Scalar color;
-
-    if (it->landmarkId != 0) {
-      color = cv::Scalar(255, 0, 0);  // blue
-    } else {
-      color = cv::Scalar(0, 0, 255);  // red
-    }
+    cv::Scalar color = observationColor(*it);
 
     // draw matches to keyframe
     keypoint = it->keypointMeasurement;
     if (fabs(it->landmark_W[3]) > 1.0e-8) {
       Eigen::Vector4d hPoint = it->landmark_W;
-      if (it->isInitialized) {
-        color = cv::Scalar(0, 255, 0);  // green
-      } else {
-        color = cv::Scalar(0, 255, 255);  // yellow
-      }
       Eigen::Vector2d keyframePt;
       bool isVisibleInKeyframe = false;
       Eigen::Vector4d hP_C = lastKeyframeT_CW * hPoint;
@@ -324,6 +378,7 @@ cv::Mat VioVisualizer::drawMatches(VisualizationData::Ptr& data, size_t image_nu
     }
   }
   annotateDiagnostics(outimg);
+  drawObservationLegend(outimg);
   return outimg;
 }
 

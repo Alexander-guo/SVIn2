@@ -1531,6 +1531,27 @@ void ThreadedKFVio::optimizationLoop() {
         drift.cameraUninitialized.assign(frame_pairs->numFrames(), 0);
         drift.cameraInvalidInitialized.assign(frame_pairs->numFrames(), 0);
         drift.cameraFiniteCoverageCells.assign(frame_pairs->numFrames(), 0);
+        // Pending IDs are also assigned to otherwise-unmatched singleton
+        // keypoints by the frontend. Count occurrences under estimator_mutex_
+        // so visualization and diagnostics can distinguish those IDs from
+        // genuine temporal pending tracks without reading estimator state.
+        std::map<uint64_t, std::set<std::pair<uint64_t, size_t>>> pendingTrackImages;
+        std::map<uint64_t, std::set<uint64_t>> pendingTrackFrames;
+        for (size_t age = 0; age < estimator_.numFrames(); ++age) {
+          const uint64_t activeFrameId = estimator_.frameIdByAge(age);
+          const okvis::MultiFramePtr activeFrame = estimator_.multiFrame(activeFrameId);
+          if (!activeFrame) continue;
+          for (size_t activeCamera = 0; activeCamera < activeFrame->numFrames(); ++activeCamera) {
+            for (size_t activeKeypoint = 0;
+                 activeKeypoint < activeFrame->numKeypoints(activeCamera);
+                 ++activeKeypoint) {
+              const uint64_t activeLandmarkId = activeFrame->landmarkId(activeCamera, activeKeypoint);
+              if (activeLandmarkId == 0 || estimator_.isLandmarkAdded(activeLandmarkId)) continue;
+              pendingTrackImages[activeLandmarkId].emplace(activeFrameId, activeCamera);
+              pendingTrackFrames[activeLandmarkId].insert(activeFrameId);
+            }
+          }
+        }
         visualizationDataPtr->observations.resize(frame_pairs->numKeypoints());
         okvis::MapPoint landmark;
         auto it = visualizationDataPtr->observations.begin();
@@ -1544,13 +1565,18 @@ void ThreadedKFVio::optimizationLoop() {
             it->cameraIdx = camIndex;
             it->frameId = frame_pairs->id();
             it->landmarkId = frame_pairs->landmarkId(camIndex, k);
+            it->landmarkInGraph = it->landmarkId != 0 && estimator_.isLandmarkAdded(it->landmarkId);
+            if (!it->landmarkInGraph && it->landmarkId != 0) {
+              it->activeWindowOccurrences = pendingTrackImages[it->landmarkId].size();
+              it->activeWindowDistinctFrames = pendingTrackFrames[it->landmarkId].size();
+            }
             ++drift.keypoints;
             ++drift.cameraKeypoints[camIndex];
             if (it->landmarkId == 0) {
               ++drift.unassociated;
               ++drift.cameraUnassociated[camIndex];
             }
-            if (estimator_.isLandmarkAdded(it->landmarkId)) {
+            if (it->landmarkInGraph) {
               estimator_.getLandmark(it->landmarkId, landmark);
               it->landmark_W = landmark.point;
               if (estimator_.isLandmarkInitialized(it->landmarkId)) {

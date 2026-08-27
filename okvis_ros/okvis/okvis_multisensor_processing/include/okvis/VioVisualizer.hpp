@@ -190,6 +190,21 @@ class VioVisualizer {
    */
   cv::Mat drawMatches(VisualizationData::Ptr& data, size_t image_number);  // NOLINT
 
+  /// Classify an observation without consulting mutable estimator state. The
+  /// optimization thread fills graph membership and active-window occurrence
+  /// counts before handing data to the visualization thread.
+  static cv::Scalar observationColor(const okvis::Observation& observation);
+
+  /// Alpha-blend a clipped filled rectangle without changing subsequent text
+  /// or marker opacity.
+  static void alphaBlendRectangle(cv::Mat& image,
+                                  const cv::Rect& rectangle,
+                                  const cv::Scalar& color,
+                                  double opacity);
+
+  /// Draw the observation-state color legend in the lower-right corner.
+  static void drawObservationLegend(cv::Mat& image);
+
  private:
   /**
    * @brief Circles all keypoints in the current frame and returns the result.
