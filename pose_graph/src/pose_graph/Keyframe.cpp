@@ -1,5 +1,10 @@
 #include "pose_graph/Keyframe.h"
 
+#include <glog/logging.h>
+
+#include <fstream>
+#include <iomanip>
+#include <limits>
 #include <map>
 #include <memory>
 #include <string>
@@ -8,6 +13,56 @@
 
 #include "pose_graph/Parameters.h"
 #include "utils/UtilsOpenCV.h"
+
+namespace {
+
+struct LoopClosureFunnelRecord {
+  int current_kf_id = -1;
+  int64_t current_timestamp = 0;
+  int candidate_kf_id = -1;
+  int64_t candidate_timestamp = 0;
+  std::string camera_model;
+  size_t tracked_points = 0;
+  size_t candidate_keypoints = 0;
+  size_t descriptor_matches = 0;
+  int brief_hamming_threshold = 80;
+  int min_correspondences = 0;
+  bool pnp_attempted = false;
+  bool pnp_solver_succeeded = false;
+  bool pnp_exception = false;
+  size_t pnp_inliers = 0;
+  int pnp_iterations = 0;
+  double pnp_reprojection_threshold = 0.0;
+  double relative_yaw_deg = std::numeric_limits<double>::quiet_NaN();
+  double relative_translation_m = std::numeric_limits<double>::quiet_NaN();
+  double max_yaw_deg = 25.0;
+  double max_position_m = 15.0;
+  bool yaw_gate_passed = false;
+  bool position_gate_passed = false;
+  bool accepted = false;
+  std::string rejection_reason;
+};
+
+void appendLoopClosureFunnelRecord(const std::string& debug_output_path,
+                                   const LoopClosureFunnelRecord& record) {
+  std::ofstream output(debug_output_path + "/loop_closure_funnel.csv", std::ios::app);
+  if (!output.is_open()) {
+    LOG(ERROR) << "Could not append loop-closure funnel diagnostics in " << debug_output_path;
+    return;
+  }
+
+  output << std::setprecision(17) << record.current_kf_id << ',' << record.current_timestamp << ','
+         << record.candidate_kf_id << ',' << record.candidate_timestamp << ',' << record.camera_model << ','
+         << "opencv_pinhole" << ',' << record.tracked_points << ',' << record.candidate_keypoints << ','
+         << record.descriptor_matches << ',' << record.brief_hamming_threshold << ',' << record.min_correspondences << ','
+         << record.pnp_attempted << ',' << record.pnp_solver_succeeded << ',' << record.pnp_exception << ','
+         << record.pnp_inliers << ',' << record.pnp_iterations << ',' << record.pnp_reprojection_threshold << ','
+         << record.relative_yaw_deg << ',' << record.relative_translation_m << ',' << record.max_yaw_deg << ','
+         << record.max_position_m << ',' << record.yaw_gate_passed << ',' << record.position_gate_passed << ','
+         << record.accepted << ',' << record.rejection_reason << '\n';
+}
+
+}  // namespace
 
 const int Keyframe::TH_HIGH = 100;
 const int Keyframe::TH_LOW = 50;
@@ -305,11 +360,12 @@ void Keyframe::searchByBRIEFDes(std::vector<cv::Point2f>& matched_2d_old,
   }
 }
 
-void Keyframe::PnPRANSAC(const std::vector<cv::Point2f>& matched_2d_old,
+bool Keyframe::PnPRANSAC(const std::vector<cv::Point2f>& matched_2d_old,
                          const std::vector<cv::Point3f>& matched_3d,
                          std::vector<uchar>& status,
                          Eigen::Vector3d& PnP_T_old,
-                         Eigen::Matrix3d& PnP_R_old) {
+                         Eigen::Matrix3d& PnP_R_old,
+                         bool* threw_exception) {
   cv::Mat r, rvec, t, tmp_r;
   cv::Mat K = (cv::Mat_<double>(3, 3) << params_.camera_calibration_.focal_length_.x(),
                0,
@@ -343,20 +399,23 @@ void Keyframe::PnPRANSAC(const std::vector<cv::Point2f>& matched_2d_old,
   // Temporary fix for https://github.com/opencv/opencv/issues/17799
   // This is a bug in opencv. The bug is fixed in opencv master branch.
 
+  bool pnp_solver_succeeded = false;
+  if (threw_exception) *threw_exception = false;
   try {
-    solvePnPRansac(matched_3d,
-                   matched_2d_old,
-                   K,
-                   params_.camera_calibration_.distortion_coefficients_,
-                   rvec,
-                   t,
-                   false,
-                   params_.loop_closure_params_.pnp_ransac_iterations,
-                   params_.loop_closure_params_.pnp_reprojection_thresh,
-                   0.99,
-                   inliers);
-  } catch (cv::Exception e) {
+    pnp_solver_succeeded = solvePnPRansac(matched_3d,
+                                          matched_2d_old,
+                                          K,
+                                          params_.camera_calibration_.distortion_coefficients_,
+                                          rvec,
+                                          t,
+                                          false,
+                                          params_.loop_closure_params_.pnp_ransac_iterations,
+                                          params_.loop_closure_params_.pnp_reprojection_thresh,
+                                          0.99,
+                                          inliers);
+  } catch (const cv::Exception& e) {
     // std::cout << "Caught exception in PnPRANSAC:" << e.what() << std::endl;
+    if (threw_exception) *threw_exception = true;
     inliers.setTo(cv::Scalar(0));
   }
 
@@ -377,10 +436,27 @@ void Keyframe::PnPRANSAC(const std::vector<cv::Point2f>& matched_2d_old,
 
   PnP_R_old = R_w_c_old;
   PnP_T_old = T_w_c_old;
+  return pnp_solver_succeeded;
 }
 
 bool Keyframe::findConnection(Keyframe* old_kf) {
-  if (!old_kf->is_vio_keyframe_) return false;
+  LoopClosureFunnelRecord diagnostic;
+  diagnostic.current_kf_id = index;
+  diagnostic.current_timestamp = time_stamp;
+  diagnostic.candidate_kf_id = old_kf->index;
+  diagnostic.candidate_timestamp = old_kf->time_stamp;
+  diagnostic.camera_model = params_.camera_calibration_.projection_type_;
+  diagnostic.tracked_points = point_3d.size();
+  diagnostic.candidate_keypoints = old_kf->keypoints.size();
+  diagnostic.min_correspondences = params_.loop_closure_params_.min_correspondences;
+  diagnostic.pnp_iterations = params_.loop_closure_params_.pnp_ransac_iterations;
+  diagnostic.pnp_reprojection_threshold = params_.loop_closure_params_.pnp_reprojection_thresh;
+
+  if (!old_kf->is_vio_keyframe_) {
+    diagnostic.rejection_reason = "old_keyframe_not_vio";
+    if (params_.debug_mode_) appendLoopClosureFunnelRecord(params_.debug_output_path_, diagnostic);
+    return false;
+  }
 
   std::vector<cv::KeyPoint> matched_2d_cur;
   std::vector<cv::Point2f> matched_2d_old;
@@ -398,7 +474,7 @@ bool Keyframe::findConnection(Keyframe* old_kf) {
     cv::Mat cur_image = UtilsOpenCV::DrawCircles(image, point_2d_uv);
     std::string loop_candidate_directory = params_.debug_output_path_ + "/loop_candidates/";
     std::string filename = loop_candidate_directory + "loop_candidate_" + std::to_string(index) + "_" +
-                           std::to_string(old_kf->index) + ".png";
+                           std::to_string(old_kf->index) + ".jpg";
     UtilsOpenCV::showImagesSideBySide(cur_image, old_img, "loop closing candidates", false, true, filename);
   }
 
@@ -414,14 +490,15 @@ bool Keyframe::findConnection(Keyframe* old_kf) {
   reduceVector(matched_2d_old_norm, status);
   reduceVector(matched_ids, status);
   status.clear();
+  diagnostic.descriptor_matches = matched_2d_cur.size();
 
   if (params_.debug_mode_) {
     cv::Mat corners_match_image =
         UtilsOpenCV::DrawCornersMatches(image, matched_2d_cur, old_kf->image, matched_2d_old, true);
     std::string dscriptor_match_dir = params_.debug_output_path_ + "/descriptor_matched/";
     std::string filename = dscriptor_match_dir + "descriptor_match_" + std::to_string(index) + "_" +
-                           std::to_string(old_kf->index) + ".png";
-    cv::imwrite(filename, corners_match_image);
+                           std::to_string(old_kf->index) + ".jpg";
+    UtilsOpenCV::writeCompressedDebugImage(filename, corners_match_image);
   }
 
   // std::cout << "Size Before RANSAC: " << matched_2d_cur.size() << std::endl;
@@ -441,8 +518,8 @@ bool Keyframe::findConnection(Keyframe* old_kf) {
   //         UtilsOpenCV::DrawCornersMatches(image, matched_2d_cur, old_kf->image, matched_2d_old, true);
   //     std::string dscriptor_match_dir = pkg_path + "/output_logs/geometric_verification/";
   //     std::string filename = dscriptor_match_dir + "geometric_verification_" + std::to_string(index) + "_" +
-  //                            std::to_string(old_kf->index) + ".png";
-  //     cv::imwrite(filename, corners_match_image);
+  //                            std::to_string(old_kf->index) + ".jpg";
+  //     UtilsOpenCV::writeCompressedDebugImage(filename, corners_match_image);
   //   }
   // } else {
   //   return false;
@@ -455,13 +532,16 @@ bool Keyframe::findConnection(Keyframe* old_kf) {
   double relative_yaw;
 
   if (static_cast<int>(matched_2d_cur.size()) > params_.loop_closure_params_.min_correspondences) {
-    PnPRANSAC(matched_2d_old, matched_3d, status, PnP_T_old, PnP_R_old);
+    diagnostic.pnp_attempted = true;
+    diagnostic.pnp_solver_succeeded =
+        PnPRANSAC(matched_2d_old, matched_3d, status, PnP_T_old, PnP_R_old, &diagnostic.pnp_exception);
     reduceVector(matched_2d_cur, status);
     reduceVector(matched_2d_old, status);
     reduceVector(matched_2d_old_norm, status);
     reduceVector(matched_3d, status);
     reduceVector(matched_ids, status);
     status.clear();
+    diagnostic.pnp_inliers = matched_2d_cur.size();
 
     if (params_.debug_mode_) {
       cv::Mat pnp_verified_image =
@@ -485,8 +565,8 @@ bool Keyframe::findConnection(Keyframe* old_kf) {
       cv::vconcat(notation, pnp_verified_image, pnp_verified_image);
       std::string pnp_verified_dir = params_.debug_output_path_ + "/pnp_verified/";
       std::string filename =
-          pnp_verified_dir + "pnp_verified_" + std::to_string(index) + "_" + std::to_string(old_kf->index) + ".png";
-      cv::imwrite(filename, pnp_verified_image);
+          pnp_verified_dir + "pnp_verified_" + std::to_string(index) + "_" + std::to_string(old_kf->index) + ".jpg";
+      UtilsOpenCV::writeCompressedDebugImage(filename, pnp_verified_image);
     }
   }
 
@@ -497,8 +577,12 @@ bool Keyframe::findConnection(Keyframe* old_kf) {
     relative_q = PnP_R_old.transpose() * origin_svin_R;
 
     relative_yaw = Utils::normalizeAngle(Utils::R2ypr(origin_svin_R).x() - Utils::R2ypr(PnP_R_old).x());
+    diagnostic.relative_yaw_deg = relative_yaw;
+    diagnostic.relative_translation_m = relative_t.norm();
+    diagnostic.yaw_gate_passed = abs(relative_yaw) < 25.0;
+    diagnostic.position_gate_passed = relative_t.norm() < 15.0;
 
-    if (abs(relative_yaw) < 25.0 && relative_t.norm() < 15.0) {
+    if (diagnostic.yaw_gate_passed && diagnostic.position_gate_passed) {
       if (params_.debug_mode_) {
         cv::Mat loop_image =
             UtilsOpenCV::DrawCornersMatches(image, matched_2d_cur, old_kf->image, matched_2d_old, true);
@@ -522,8 +606,8 @@ bool Keyframe::findConnection(Keyframe* old_kf) {
         cv::vconcat(notation, loop_image, loop_image);
         std::string pnp_verified_dir = params_.debug_output_path_ + "/loop_closure/";
         std::string filename =
-            pnp_verified_dir + "loop_closure_" + std::to_string(index) + "_" + std::to_string(old_kf->index) + ".png";
-        cv::imwrite(filename, loop_image);
+            pnp_verified_dir + "loop_closure_" + std::to_string(index) + "_" + std::to_string(old_kf->index) + ".jpg";
+        UtilsOpenCV::writeCompressedDebugImage(filename, loop_image);
         std::string loop_closure_stats = params_.debug_output_path_ + "/loop_closure.txt";
         std::ofstream loop_closure_file(loop_closure_stats, std::ios::app);
         loop_closure_file.setf(std::ios::fixed, std::ios::floatfield);
@@ -538,9 +622,28 @@ bool Keyframe::findConnection(Keyframe* old_kf) {
       loop_index = old_kf->index;
       loop_info << relative_t.x(), relative_t.y(), relative_t.z(), relative_q.w(), relative_q.x(), relative_q.y(),
           relative_q.z(), relative_yaw;
+      diagnostic.accepted = true;
+      diagnostic.rejection_reason = "accepted";
+      if (params_.debug_mode_) appendLoopClosureFunnelRecord(params_.debug_output_path_, diagnostic);
       return true;
     }
   }
+
+  if (!diagnostic.pnp_attempted) {
+    diagnostic.rejection_reason = "insufficient_descriptor_matches";
+  } else if (diagnostic.pnp_inliers <= static_cast<size_t>(params_.loop_closure_params_.min_correspondences)) {
+    diagnostic.rejection_reason = diagnostic.pnp_exception
+                                      ? "pnp_exception"
+                                      : (diagnostic.pnp_solver_succeeded ? "insufficient_pnp_inliers"
+                                                                        : "pnp_solver_failed");
+  } else if (!diagnostic.yaw_gate_passed && !diagnostic.position_gate_passed) {
+    diagnostic.rejection_reason = "yaw_and_position_gates_failed";
+  } else if (!diagnostic.yaw_gate_passed) {
+    diagnostic.rejection_reason = "yaw_gate_failed";
+  } else {
+    diagnostic.rejection_reason = "position_gate_failed";
+  }
+  if (params_.debug_mode_) appendLoopClosureFunnelRecord(params_.debug_output_path_, diagnostic);
 
   return false;
 }

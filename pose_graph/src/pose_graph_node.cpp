@@ -79,6 +79,29 @@ void setupOutputLogDirectories(const std::string base_path) {
                  << "relative_roll" << std::endl;
   loop_path_file.close();
 
+  std::string loop_funnel_file = base_path + "/loop_closure_funnel.csv";
+  if (std::filesystem::exists(loop_funnel_file)) {
+    std::filesystem::remove(loop_funnel_file);
+  }
+  std::ofstream loop_funnel_stream(loop_funnel_file, std::ios::out);
+  loop_funnel_stream
+      << "current_kf_id,current_timestamp,candidate_kf_id,candidate_timestamp,camera_model,pnp_model,tracked_points,"
+         "candidate_keypoints,descriptor_matches,brief_hamming_threshold,min_correspondences,pnp_attempted,"
+         "pnp_solver_succeeded,pnp_exception,"
+         "pnp_inliers,pnp_iterations,pnp_reprojection_threshold,relative_yaw_deg,relative_translation_m,max_yaw_deg,"
+         "max_position_m,yaw_gate_passed,position_gate_passed,accepted,rejection_reason\n";
+  loop_funnel_stream.close();
+
+  std::string dbow_funnel_file = base_path + "/loop_closure_dbow_funnel.csv";
+  if (std::filesystem::exists(dbow_funnel_file)) {
+    std::filesystem::remove(dbow_funnel_file);
+  }
+  std::ofstream dbow_funnel_stream(dbow_funnel_file, std::ios::out);
+  dbow_funnel_stream << "current_kf_id,current_timestamp,min_neighbor_score,score_threshold,query_max_id,"
+                        "query_result_count,passing_result_count,best_passing_candidate_id,best_passing_score,"
+                        "selected_candidate_id,temporal_gap,decision\n";
+  dbow_funnel_stream.close();
+
   std::string switch_info_file = base_path + "/switch_info.txt";
   if (std::filesystem::exists(switch_info_file)) {
     std::filesystem::remove(switch_info_file);

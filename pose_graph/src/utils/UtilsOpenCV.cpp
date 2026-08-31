@@ -14,6 +14,11 @@
 #include <vector>
 
 #include "utils/Utils.h"
+
+namespace {
+constexpr int kDebugJpegQuality = 92;
+}
+
 /* -------------------------------------------------------------------------- */
 // add circles in the image at desired position/size/color
 void UtilsOpenCV::DrawCirclesInPlace(cv::Mat& img,
@@ -236,8 +241,14 @@ void UtilsOpenCV::showImagesSideBySide(const cv::Mat& img_left,
   }
 
   if (save_images) {
-    cv::imwrite(filename, original_left_right);
+    UtilsOpenCV::writeCompressedDebugImage(filename, original_left_right);
   }
+}
+
+bool UtilsOpenCV::writeCompressedDebugImage(const std::string& filename, const cv::Mat& image) {
+  const std::vector<int> jpeg_parameters = {
+      cv::IMWRITE_JPEG_QUALITY, kDebugJpegQuality, cv::IMWRITE_JPEG_OPTIMIZE, 1};
+  return cv::imwrite(filename, image, jpeg_parameters);
 }
 
 /* -------------------------------------------------------------------------- */

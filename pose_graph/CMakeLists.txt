@@ -100,6 +100,7 @@ add_executable(pose_graph_node src/pose_graph_node.cpp)
 ament_target_dependencies(pose_graph_node ${ament_libraries})
 target_link_libraries(pose_graph_node ${PROJECT_NAME}_lib )
 install(TARGETS pose_graph_node DESTINATION lib/${PROJECT_NAME})
+install(PROGRAMS scripts/summarize_loop_closure_funnel.py DESTINATION lib/${PROJECT_NAME})
 
 ament_export_include_directories(include)
 ament_export_dependencies(${ament_libraries})

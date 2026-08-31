@@ -72,11 +72,12 @@ class Keyframe {
                         const std::vector<DVision::BRIEF256::bitset>& descriptors_old,
                         const std::vector<cv::KeyPoint>& keypoints_old,
                         const std::vector<cv::KeyPoint>& keypoints_old_norm);
-  void PnPRANSAC(const std::vector<cv::Point2f>& matched_2d_old_norm,
+  bool PnPRANSAC(const std::vector<cv::Point2f>& matched_2d_old_norm,
                  const std::vector<cv::Point3f>& matched_3d,
                  std::vector<uchar>& status,                           // NOLINT
                  Eigen::Vector3d& PnP_T_old,                           // NOLINT
-                 Eigen::Matrix3d& PnP_R_old);                          // NOLINT
+                 Eigen::Matrix3d& PnP_R_old,                           // NOLINT
+                 bool* threw_exception = nullptr);                     // NOLINT
   void getSVInPose(Eigen::Vector3d& _T_w_i, Eigen::Matrix3d& _R_w_i);  // NOLINT
   void getPose(Eigen::Vector3d& _T_w_i, Eigen::Matrix3d& _R_w_i);      // NOLINT
   void updatePose(const Eigen::Vector3d& _T_w_i, const Eigen::Matrix3d& _R_w_i);

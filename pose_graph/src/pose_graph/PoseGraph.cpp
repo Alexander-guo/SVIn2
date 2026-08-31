@@ -5,12 +5,49 @@
 #include <ceres/problem.h>
 #include <ceres/solver.h>
 
+#include <fstream>
+#include <iomanip>
 #include <list>
 #include <map>
 #include <set>
 #include <string>
 
 #include "pose_graph/Pose3DError.h"
+
+namespace {
+
+void appendDBoWFunnelRecord(const Keyframe* keyframe,
+                            int frame_index,
+                            float min_score,
+                            const DBoW2::QueryResults& results,
+                            int selected_candidate_id,
+                            const std::string& decision) {
+  if (!keyframe->params_.debug_mode_) return;
+
+  const double score_threshold = 0.60 * min_score;
+  int passing_results = 0;
+  int best_passing_id = -1;
+  double best_passing_score = 0.0;
+  for (const auto& result : results) {
+    if (result.Score > score_threshold) {
+      passing_results++;
+      if (best_passing_id == -1 || result.Score > best_passing_score) {
+        best_passing_id = result.Id;
+        best_passing_score = result.Score;
+      }
+    }
+  }
+
+  const int temporal_gap = selected_candidate_id >= 0 ? frame_index - selected_candidate_id : -1;
+  std::ofstream output(keyframe->params_.debug_output_path_ + "/loop_closure_dbow_funnel.csv", std::ios::app);
+  if (!output.is_open()) return;
+  output << std::setprecision(17) << frame_index << ',' << keyframe->time_stamp << ',' << min_score << ','
+         << score_threshold << ',' << frame_index - 50 << ',' << results.size() << ',' << passing_results << ','
+         << best_passing_id << ',' << best_passing_score << ',' << selected_candidate_id << ',' << temporal_gap << ','
+         << decision << '\n';
+}
+
+}  // namespace
 
 PoseGraph::PoseGraph() {
   earliest_loop_index = -1;
@@ -217,8 +254,18 @@ int PoseGraph::detectLoop(Keyframe* keyframe, int frame_index) {
         best_score = ret[i].Score;
       }
     }
+    appendDBoWFunnelRecord(keyframe, frame_index, min_score, ret, best_index, "candidate_selected");
     return best_index;
   } else {
+    std::string decision;
+    if (frame_index <= 50) {
+      decision = "warmup";
+    } else if (ret.empty()) {
+      decision = "no_query_results";
+    } else {
+      decision = "score_threshold_failed";
+    }
+    appendDBoWFunnelRecord(keyframe, frame_index, min_score, ret, -1, decision);
     return -1;
   }
 }

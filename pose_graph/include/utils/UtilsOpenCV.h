@@ -87,6 +87,9 @@ class UtilsOpenCV {
                                    const bool& save_images,
                                    const std::string& folder = "");
 
+  // Save a full-resolution debug image as a high-quality, space-efficient JPEG.
+  static bool writeCompressedDebugImage(const std::string& filename, const cv::Mat& image);
+
   static cv::Mat DrawCornersMatches(const cv::Mat& img1,
                                     const std::vector<cv::KeyPoint>& corners_1,
                                     const cv::Mat& img2,
