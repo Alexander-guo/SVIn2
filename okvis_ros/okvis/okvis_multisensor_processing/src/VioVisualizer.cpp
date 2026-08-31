@@ -56,6 +56,7 @@
 #include <iomanip>
 #include <memory>
 #include <okvis/cameras/DoubleSphereCamera.hpp>
+#include <okvis/cameras/CameraValidDomain.hpp>
 #include <okvis/cameras/EquidistantDistortion.hpp>
 #include <okvis/cameras/NoDistortion.hpp>
 #include <okvis/cameras/PinholeCamera.hpp>
@@ -163,7 +164,10 @@ cv::Mat VioVisualizer::drawMatches(VisualizationData::Ptr& data, size_t image_nu
   const auto panelWidth = [](const cv::Mat& image) {
     return std::max(1, cvRound(static_cast<double>(image.cols) * kPanelHeight / image.rows));
   };
-  const auto toDisplayImage = [&](const cv::Mat& image, cv::Mat& displayImage, int width) {
+  const auto toDisplayImage = [&](const cv::Mat& image,
+                                  const std::shared_ptr<const okvis::cameras::CameraBase>& geometry,
+                                  cv::Mat& displayImage,
+                                  int width) {
     cv::Mat colorImage;
     if (image.channels() == 1) {
       cv::cvtColor(image, colorImage, cv::COLOR_GRAY2BGR);
@@ -171,6 +175,10 @@ cv::Mat VioVisualizer::drawMatches(VisualizationData::Ptr& data, size_t image_nu
       colorImage = image;
     }
     cv::resize(colorImage, displayImage, cv::Size(width, kPanelHeight), 0.0, 0.0, cv::INTER_AREA);
+    const cv::Mat validMask = okvis::cameras::cameraValidDomainMask(geometry, image.size());
+    cv::Mat displayValidMask;
+    cv::resize(validMask, displayValidMask, displayImage.size(), 0.0, 0.0, cv::INTER_NEAREST);
+    okvis::cameras::overlayInvalidCameraDomain50Percent(&displayImage, displayValidMask);
   };
 
   cv::Mat grayImage;
@@ -266,7 +274,7 @@ cv::Mat VioVisualizer::drawMatches(VisualizationData::Ptr& data, size_t image_nu
   const double currentScale = static_cast<double>(kPanelHeight) / currentImage.rows;
   if (keyframe == nullptr) {
     cv::Mat currentDisplay;
-    toDisplayImage(currentImage, currentDisplay, currentWidth);
+    toDisplayImage(currentImage, frame->geometry(image_number), currentDisplay, currentWidth);
     annotateDiagnostics(currentDisplay);
     drawObservationLegend(currentDisplay);
     return currentDisplay;
@@ -282,8 +290,8 @@ cv::Mat VioVisualizer::drawMatches(VisualizationData::Ptr& data, size_t image_nu
   cv::Mat outimg(2 * kPanelHeight, outputWidth, CV_8UC3, cv::Scalar::all(0));
   cv::Mat current = outimg(cv::Rect(0, rowJump, currentWidth, kPanelHeight));
   cv::Mat actKeyframe = outimg(cv::Rect(0, 0, keyframeWidth, kPanelHeight));
-  toDisplayImage(currentImage, current, currentWidth);
-  toDisplayImage(keyframeImage, actKeyframe, keyframeWidth);
+  toDisplayImage(currentImage, frame->geometry(image_number), current, currentWidth);
+  toDisplayImage(keyframeImage, keyframe->geometry(image_number), actKeyframe, keyframeWidth);
 
   const auto scaledPoint = [](const Eigen::Vector2d& point, double scale, double yOffset = 0.0) {
     return cv::Point2f(static_cast<float>(point[0] * scale), static_cast<float>(point[1] * scale + yOffset));
@@ -350,7 +358,7 @@ cv::Mat VioVisualizer::drawMatches(VisualizationData::Ptr& data, size_t image_nu
           break;
       }
       if (fabs(hP_C[3]) > 1.0e-8) {
-        if (hP_C[2] / hP_C[3] < 0.4) {
+        if (hP_C[2] / hP_C[3] < 0.25) {
           isVisibleInKeyframe = false;
         }
       }

@@ -58,6 +58,7 @@
 #include <vector>
 
 #include "okvis/cameras/CameraBase.hpp"
+#include "okvis/cameras/CameraValidDomain.hpp"
 
 /// \brief okvis Main namespace of this package.
 namespace okvis {

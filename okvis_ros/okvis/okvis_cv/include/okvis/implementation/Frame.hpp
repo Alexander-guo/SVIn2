@@ -133,7 +133,10 @@ int Frame::detect() {
 
   // run the detector
   OKVIS_ASSERT_TRUE_DBG(Exception, detector_ != NULL, "Detector not initialised!");
-  detector_->detect(image_, keypoints_);
+  const cv::Mat validMask = cameras::cameraValidDomainMask(cameraGeometry_, image_.size());
+  const cv::Mat detectionImage = cameras::cameraDomainMaskedDetectionImage(image_, validMask);
+  detector_->detect(detectionImage, keypoints_);
+  cameras::retainValidCameraKeypoints(&keypoints_, validMask, cameraGeometry_);
   return keypoints_.size();
 }
 

@@ -11,6 +11,7 @@
 #include <tuple>
 
 #include <opencv2/imgproc.hpp>
+#include <okvis/cameras/CameraValidDomain.hpp>
 
 namespace okvis {
 
@@ -29,24 +30,6 @@ int cellIndex(const cv::KeyPoint& keypoint, const cv::Size& size, int rows, int 
   const int col = std::min(cols - 1, static_cast<int>(keypoint.pt.x * cols / size.width));
   const int row = std::min(rows - 1, static_cast<int>(keypoint.pt.y * rows / size.height));
   return row * cols + col;
-}
-
-bool cameraValid(const cv::KeyPoint& keypoint,
-                 const std::shared_ptr<const cameras::CameraBase>& geometry) {
-  if (!geometry) return true;
-  Eigen::Vector3d direction;
-  if (!geometry->backProject(Eigen::Vector2d(keypoint.pt.x, keypoint.pt.y), &direction) || !direction.allFinite()) {
-    return false;
-  }
-  if (geometry->hasMask()) {
-    const int x = static_cast<int>(keypoint.pt.x);
-    const int y = static_cast<int>(keypoint.pt.y);
-    if (x < 0 || y < 0 || x >= geometry->mask().cols || y >= geometry->mask().rows ||
-        geometry->mask().at<unsigned char>(y, x) != 0) {
-      return false;
-    }
-  }
-  return true;
 }
 
 cv::Rect cellRectangle(const cv::Size& imageSize, int row, int col, int rows, int cols) {
@@ -92,10 +75,13 @@ SpatialKeypointBalanceResult balanceSpatialKeypoints(
   result.selectedPerCell.assign(static_cast<size_t>(cellCount), 0);
   if (cellCount <= 0 || imageSize.width <= 0 || imageSize.height <= 0 || maximumKeypoints == 0) return result;
 
+  const cv::Mat validMask = cameras::cameraValidDomainMask(geometry, imageSize);
+
   std::vector<std::vector<cv::KeyPoint>> cells(static_cast<size_t>(cellCount));
   for (const cv::KeyPoint& keypoint : candidates) {
     const int cell = cellIndex(keypoint, imageSize, parameters.rows, parameters.cols);
-    if (cell < 0 || !std::isfinite(keypoint.response) || !cameraValid(keypoint, geometry)) {
+    if (cell < 0 || !std::isfinite(keypoint.response) ||
+        !cameras::isValidCameraKeypoint(keypoint, validMask, geometry)) {
       ++result.invalidCandidates;
       continue;
     }
@@ -156,6 +142,9 @@ SpatialKeypointBalanceResult detectAndBalanceSpatialKeypoints(
   empty.selectedPerCell.assign(static_cast<size_t>(std::max(0, cellCount)), 0);
   if (image.empty() || cellCount <= 0 || maximumKeypoints == 0) return empty;
 
+  const cv::Mat validMask = cameras::cameraValidDomainMask(geometry, image.size());
+  const cv::Mat detectionImage = cameras::cameraDomainMaskedDetectionImage(image, validMask);
+
   const size_t multiplier = static_cast<size_t>(std::max(1, parameters.candidateMultiplier));
   const size_t targetCandidateCount =
       maximumKeypoints > std::numeric_limits<size_t>::max() / multiplier
@@ -176,7 +165,7 @@ SpatialKeypointBalanceResult detectAndBalanceSpatialKeypoints(
       const cv::Rect padded = paddedRectangle(ownership, image.size(), parameters.localPaddingPixels);
       // BRISK requires continuous input. Padding supplies detector context;
       // ownership filtering below prevents duplicates and artificial ROI-edge features.
-      const cv::Mat localImage = image(padded).clone();
+      const cv::Mat localImage = detectionImage(padded).clone();
       std::vector<cv::KeyPoint> localKeypoints;
       detector.detect(localImage, localKeypoints);
       std::vector<cv::KeyPoint> validOwned;
@@ -186,7 +175,8 @@ SpatialKeypointBalanceResult detectAndBalanceSpatialKeypoints(
         keypoint.pt.y += static_cast<float>(padded.y);
         if (!ownership.contains(cv::Point(cvFloor(keypoint.pt.x), cvFloor(keypoint.pt.y)))) continue;
         ++empty.rawDetectionsPerCell[cell];
-        if (!std::isfinite(keypoint.response) || !cameraValid(keypoint, geometry)) {
+        if (!std::isfinite(keypoint.response) ||
+            !cameras::isValidCameraKeypoint(keypoint, validMask, geometry)) {
           ++empty.invalidCandidates;
           continue;
         }
