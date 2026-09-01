@@ -1,6 +1,9 @@
 #include "pose_graph/Keyframe.h"
 
 #include <glog/logging.h>
+#include <opengv/absolute_pose/CentralAbsoluteAdapter.hpp>
+#include <opengv/sac/Ransac.hpp>
+#include <opengv/sac_problems/absolute_pose/AbsolutePoseSacProblem.hpp>
 
 #include <fstream>
 #include <iomanip>
@@ -11,6 +14,8 @@
 #include <utility>
 #include <vector>
 
+#include "okvis/cameras/DoubleSphereCamera.hpp"
+#include "okvis/cameras/NoDistortion.hpp"
 #include "pose_graph/Parameters.h"
 #include "utils/UtilsOpenCV.h"
 
@@ -22,6 +27,7 @@ struct LoopClosureFunnelRecord {
   int candidate_kf_id = -1;
   int64_t candidate_timestamp = 0;
   std::string camera_model;
+  std::string pnp_model;
   size_t tracked_points = 0;
   size_t candidate_keypoints = 0;
   size_t descriptor_matches = 0;
@@ -53,7 +59,7 @@ void appendLoopClosureFunnelRecord(const std::string& debug_output_path,
 
   output << std::setprecision(17) << record.current_kf_id << ',' << record.current_timestamp << ','
          << record.candidate_kf_id << ',' << record.candidate_timestamp << ',' << record.camera_model << ','
-         << "opencv_pinhole" << ',' << record.tracked_points << ',' << record.candidate_keypoints << ','
+         << record.pnp_model << ',' << record.tracked_points << ',' << record.candidate_keypoints << ','
          << record.descriptor_matches << ',' << record.brief_hamming_threshold << ',' << record.min_correspondences << ','
          << record.pnp_attempted << ',' << record.pnp_solver_succeeded << ',' << record.pnp_exception << ','
          << record.pnp_inliers << ',' << record.pnp_iterations << ',' << record.pnp_reprojection_threshold << ','
@@ -61,6 +67,44 @@ void appendLoopClosureFunnelRecord(const std::string& debug_output_path,
          << record.max_position_m << ',' << record.yaw_gate_passed << ',' << record.position_gate_passed << ','
          << record.accepted << ',' << record.rejection_reason << '\n';
 }
+
+class PixelReprojectionAbsolutePoseSacProblem
+    : public opengv::sac_problems::absolute_pose::AbsolutePoseSacProblem {
+ public:
+  using Base = opengv::sac_problems::absolute_pose::AbsolutePoseSacProblem;
+  using Model = Base::model_t;
+
+  PixelReprojectionAbsolutePoseSacProblem(Base::adapter_t& adapter,
+                                          const okvis::cameras::CameraBase& camera,
+                                          const std::vector<cv::Point2f>& image_points)
+      : Base(adapter, Base::KNEIP), camera_(camera), image_points_(image_points) {}
+
+  void getSelectedDistancesToModel(const Model& model,
+                                   const std::vector<int>& indices,
+                                   std::vector<double>& scores) const override {
+    const Eigen::Matrix3d R_c_w = model.leftCols<3>().transpose();
+    const Eigen::Vector3d T_w_c = model.col(3);
+    scores.reserve(scores.size() + indices.size());
+
+    for (const int index : indices) {
+      const Eigen::Vector3d point_c = R_c_w * (_adapter.getPoint(index) - T_w_c);
+      Eigen::Vector2d projected;
+      const auto projection_status = camera_.project(point_c, &projected);
+      if (projection_status != okvis::cameras::CameraBase::ProjectionStatus::Successful ||
+          !projected.allFinite()) {
+        scores.push_back(std::numeric_limits<double>::infinity());
+        continue;
+      }
+
+      const Eigen::Vector2d observed(image_points_[index].x, image_points_[index].y);
+      scores.push_back((projected - observed).squaredNorm());
+    }
+  }
+
+ private:
+  const okvis::cameras::CameraBase& camera_;
+  const std::vector<cv::Point2f>& image_points_;
+};
 
 }  // namespace
 
@@ -366,7 +410,71 @@ bool Keyframe::PnPRANSAC(const std::vector<cv::Point2f>& matched_2d_old,
                          Eigen::Vector3d& PnP_T_old,
                          Eigen::Matrix3d& PnP_R_old,
                          bool* threw_exception) {
+  status.assign(matched_2d_old.size(), 0);
+  if (threw_exception) *threw_exception = false;
+  if (matched_2d_old.size() != matched_3d.size()) return false;
+
+  if (params_.camera_calibration_.projection_type_ == "double_sphere") {
+    try {
+      using DoubleSphereCamera = okvis::cameras::DoubleSphereCamera<okvis::cameras::NoDistortion>;
+      const CameraCalibration& calibration = params_.camera_calibration_;
+      const DoubleSphereCamera camera(calibration.image_dimension_.x(),
+                                      calibration.image_dimension_.y(),
+                                      calibration.focal_length_.x(),
+                                      calibration.focal_length_.y(),
+                                      calibration.principal_point_.x(),
+                                      calibration.principal_point_.y(),
+                                      calibration.double_sphere_params_.x(),
+                                      calibration.double_sphere_params_.y(),
+                                      okvis::cameras::NoDistortion());
+
+      opengv::bearingVectors_t bearing_vectors;
+      opengv::points_t world_points;
+      std::vector<cv::Point2f> valid_image_points;
+      std::vector<size_t> original_indices;
+      bearing_vectors.reserve(matched_2d_old.size());
+      world_points.reserve(matched_3d.size());
+      valid_image_points.reserve(matched_2d_old.size());
+      original_indices.reserve(matched_2d_old.size());
+
+      for (size_t i = 0; i < matched_2d_old.size(); ++i) {
+        Eigen::Vector3d bearing;
+        const Eigen::Vector2d image_point(matched_2d_old[i].x, matched_2d_old[i].y);
+        if (!camera.backProject(image_point, &bearing) || !bearing.allFinite() || bearing.norm() == 0.0) continue;
+
+        bearing_vectors.push_back(bearing.normalized());
+        world_points.emplace_back(matched_3d[i].x, matched_3d[i].y, matched_3d[i].z);
+        valid_image_points.push_back(matched_2d_old[i]);
+        original_indices.push_back(i);
+      }
+
+      if (bearing_vectors.size() < 4) return false;
+
+      opengv::absolute_pose::CentralAbsoluteAdapter adapter(bearing_vectors, world_points);
+      using SacProblem = PixelReprojectionAbsolutePoseSacProblem;
+      opengv::sac::Ransac<SacProblem> ransac;
+      ransac.sac_model_ = std::make_shared<SacProblem>(adapter, camera, valid_image_points);
+      const double pixel_threshold = params_.loop_closure_params_.pnp_reprojection_thresh;
+      ransac.threshold_ = pixel_threshold * pixel_threshold;
+      ransac.max_iterations_ = static_cast<int>(params_.loop_closure_params_.pnp_ransac_iterations);
+      ransac.probability_ = 0.99;
+
+      const bool solver_succeeded = ransac.computeModel();
+      if (!solver_succeeded || !ransac.model_coefficients_.allFinite()) return false;
+
+      for (const int inlier : ransac.inliers_) status[original_indices[inlier]] = 1;
+      PnP_R_old = ransac.model_coefficients_.leftCols<3>();
+      PnP_T_old = ransac.model_coefficients_.col(3);
+      return true;
+    } catch (const std::exception& exception) {
+      LOG(WARNING) << "Double Sphere PnP failed with exception: " << exception.what();
+      if (threw_exception) *threw_exception = true;
+      return false;
+    }
+  }
+
   cv::Mat r, rvec, t, tmp_r;
+
   cv::Mat K = (cv::Mat_<double>(3, 3) << params_.camera_calibration_.focal_length_.x(),
                0,
                params_.camera_calibration_.principal_point_.x(),
@@ -400,7 +508,6 @@ bool Keyframe::PnPRANSAC(const std::vector<cv::Point2f>& matched_2d_old,
   // This is a bug in opencv. The bug is fixed in opencv master branch.
 
   bool pnp_solver_succeeded = false;
-  if (threw_exception) *threw_exception = false;
   try {
     pnp_solver_succeeded = solvePnPRansac(matched_3d,
                                           matched_2d_old,
@@ -418,8 +525,6 @@ bool Keyframe::PnPRANSAC(const std::vector<cv::Point2f>& matched_2d_old,
     if (threw_exception) *threw_exception = true;
     inliers.setTo(cv::Scalar(0));
   }
-
-  for (int i = 0; i < static_cast<int>(matched_2d_old.size()); i++) status.push_back(0);
 
   for (int i = 0; i < inliers.rows; i++) {
     int n = inliers.at<int>(i);
@@ -446,6 +551,7 @@ bool Keyframe::findConnection(Keyframe* old_kf) {
   diagnostic.candidate_kf_id = old_kf->index;
   diagnostic.candidate_timestamp = old_kf->time_stamp;
   diagnostic.camera_model = params_.camera_calibration_.projection_type_;
+  diagnostic.pnp_model = diagnostic.camera_model == "double_sphere" ? "opengv_bearing_ds" : "opencv_pinhole";
   diagnostic.tracked_points = point_3d.size();
   diagnostic.candidate_keypoints = old_kf->keypoints.size();
   diagnostic.min_correspondences = params_.loop_closure_params_.min_correspondences;

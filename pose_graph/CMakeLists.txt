@@ -39,6 +39,12 @@ find_package(Glog REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(brisk 2 REQUIRED )
 find_package(Ceres 2.1.0 REQUIRED)
+find_package(opengv REQUIRED)
+find_package(okvis REQUIRED)
+
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+endif()
 
 add_definitions(-march=native -O3 -fPIC -Wall -std=c++17)
 
@@ -59,6 +65,7 @@ set(ament_libraries
 
 include_directories(include 
                     ThirdParty
+                    ${okvis_ros_INCLUDE_DIRS}
                     ${CERES_INCLUDE_DIRS}
                     ${EIGEN3_INCLUDE_DIR}
                     ${BRISK_INCLUDE_DIRS}
@@ -93,7 +100,9 @@ ament_target_dependencies(${PROJECT_NAME}_lib ${ament_libraries})
 target_link_libraries(${PROJECT_NAME}_lib
   ${OpenCV_LIBS}
   ${CERES_LIBRARIES} 
-  ${BRISK_LIBRARIES})
+  ${BRISK_LIBRARIES}
+  okvis_cv
+  opengv)
 
 
 add_executable(pose_graph_node src/pose_graph_node.cpp)
@@ -101,6 +110,12 @@ ament_target_dependencies(pose_graph_node ${ament_libraries})
 target_link_libraries(pose_graph_node ${PROJECT_NAME}_lib )
 install(TARGETS pose_graph_node DESTINATION lib/${PROJECT_NAME})
 install(PROGRAMS scripts/summarize_loop_closure_funnel.py DESTINATION lib/${PROJECT_NAME})
+
+if(BUILD_TESTING)
+  ament_add_gtest(test_camera_model_pnp test/test_camera_model_pnp.cpp)
+  target_link_libraries(test_camera_model_pnp ${PROJECT_NAME}_lib)
+  ament_target_dependencies(test_camera_model_pnp ${ament_libraries})
+endif()
 
 ament_export_include_directories(include)
 ament_export_dependencies(${ament_libraries})
