@@ -377,6 +377,7 @@ bool Keyframe::searchInAera(const DVision::BRIEF256::bitset window_descriptor,
     }
   }
   // printf("best dist %d", bestDist);
+  // hard-coded hamming distance threshold for BRIEF256 here
   if (bestIndex != -1 && bestDist < 80) {
     best_match = keypoints_old[bestIndex].pt;
     best_match_norm = keypoints_old_norm[bestIndex].pt;
@@ -557,10 +558,14 @@ bool Keyframe::findConnection(Keyframe* old_kf) {
   diagnostic.min_correspondences = params_.loop_closure_params_.min_correspondences;
   diagnostic.pnp_iterations = params_.loop_closure_params_.pnp_ransac_iterations;
   diagnostic.pnp_reprojection_threshold = params_.loop_closure_params_.pnp_reprojection_thresh;
+  diagnostic.max_yaw_deg = params_.loop_closure_params_.max_yaw_diff;
+  diagnostic.max_position_m = params_.loop_closure_params_.max_position_diff;
 
   if (!old_kf->is_vio_keyframe_) {
     diagnostic.rejection_reason = "old_keyframe_not_vio";
-    if (params_.debug_mode_) appendLoopClosureFunnelRecord(params_.debug_output_path_, diagnostic);
+    if (params_.loopClosureDiagnosticsEnabled()) {
+      appendLoopClosureFunnelRecord(params_.debug_output_path_, diagnostic);
+    }
     return false;
   }
 
@@ -685,8 +690,8 @@ bool Keyframe::findConnection(Keyframe* old_kf) {
     relative_yaw = Utils::normalizeAngle(Utils::R2ypr(origin_svin_R).x() - Utils::R2ypr(PnP_R_old).x());
     diagnostic.relative_yaw_deg = relative_yaw;
     diagnostic.relative_translation_m = relative_t.norm();
-    diagnostic.yaw_gate_passed = abs(relative_yaw) < 25.0;
-    diagnostic.position_gate_passed = relative_t.norm() < 15.0;
+    diagnostic.yaw_gate_passed = abs(relative_yaw) < params_.loop_closure_params_.max_yaw_diff;
+    diagnostic.position_gate_passed = relative_t.norm() < params_.loop_closure_params_.max_position_diff;
 
     if (diagnostic.yaw_gate_passed && diagnostic.position_gate_passed) {
       if (params_.debug_mode_) {
@@ -730,7 +735,9 @@ bool Keyframe::findConnection(Keyframe* old_kf) {
           relative_q.z(), relative_yaw;
       diagnostic.accepted = true;
       diagnostic.rejection_reason = "accepted";
-      if (params_.debug_mode_) appendLoopClosureFunnelRecord(params_.debug_output_path_, diagnostic);
+      if (params_.loopClosureDiagnosticsEnabled()) {
+        appendLoopClosureFunnelRecord(params_.debug_output_path_, diagnostic);
+      }
       return true;
     }
   }
@@ -749,7 +756,9 @@ bool Keyframe::findConnection(Keyframe* old_kf) {
   } else {
     diagnostic.rejection_reason = "position_gate_failed";
   }
-  if (params_.debug_mode_) appendLoopClosureFunnelRecord(params_.debug_output_path_, diagnostic);
+  if (params_.loopClosureDiagnosticsEnabled()) {
+    appendLoopClosureFunnelRecord(params_.debug_output_path_, diagnostic);
+  }
 
   return false;
 }

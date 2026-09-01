@@ -22,7 +22,7 @@ void appendDBoWFunnelRecord(const Keyframe* keyframe,
                             const DBoW2::QueryResults& results,
                             int selected_candidate_id,
                             const std::string& decision) {
-  if (!keyframe->params_.debug_mode_) return;
+  if (!keyframe->params_.loopClosureDiagnosticsEnabled()) return;
 
   const double score_threshold = 0.60 * min_score;
   int passing_results = 0;
@@ -106,7 +106,7 @@ void PoseGraph::addKFToPoseGraph(Keyframe* cur_kf, bool flag_detect_loop) {
   std::set<Keyframe*> loopCandidates;
   int loop_index = -1;
 
-  if (flag_detect_loop) {  // at least 20 KF has been passed
+  if (flag_detect_loop) {  // at least 50 KF has been passed
     loop_index = detectLoop(cur_kf, cur_kf->index);
   } else {
     db.add(cur_kf->brief_descriptors);

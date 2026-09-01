@@ -1,0 +1,21 @@
+%YAML:1.0
+---
+loop_closure_params:
+  keyframe_queue: -1
+  max_yaw_diff: 30.0
+  max_position_diff: 6.0
+output_params:
+  debug: 1
+  lc_diagnostic: true
+  output_dir: ../pose_graph
+cameras:
+  - T_SC: [1.0, 0.0, 0.0, 0.0,
+           0.0, 1.0, 0.0, 0.0,
+           0.0, 0.0, 1.0, 0.0,
+           0.0, 0.0, 0.0, 1.0]
+    image_dimension: [640, 480]
+    projection_type: double_sphere
+    focal_length: [300.0, 300.0]
+    principal_point: [320.0, 240.0]
+    xi: 0.1
+    alpha: 0.6

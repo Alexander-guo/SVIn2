@@ -115,6 +115,10 @@ if(BUILD_TESTING)
   ament_add_gtest(test_camera_model_pnp test/test_camera_model_pnp.cpp)
   target_link_libraries(test_camera_model_pnp ${PROJECT_NAME}_lib)
   ament_target_dependencies(test_camera_model_pnp ${ament_libraries})
+
+  ament_add_gtest(test_loop_closure_parameters test/test_loop_closure_parameters.cpp)
+  target_link_libraries(test_loop_closure_parameters ${PROJECT_NAME}_lib)
+  ament_target_dependencies(test_loop_closure_parameters ${ament_libraries})
 endif()
 
 ament_export_include_directories(include)

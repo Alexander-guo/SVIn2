@@ -4,6 +4,7 @@
 
 #include <ament_index_cpp/get_package_share_directory.hpp>
 #include <boost/filesystem.hpp>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -18,6 +19,7 @@ Parameters::Parameters() {
   health_params_.kf_wait_time = 0.5;
   health_params_.consecutive_keyframes = 5;
   debug_mode_ = false;
+  lc_diagnostic_ = false;
   image_delay_ = 0.0;
 
   // Enable loop closure by default
@@ -25,6 +27,9 @@ Parameters::Parameters() {
   loop_closure_params_.min_correspondences = 25;
   loop_closure_params_.pnp_reprojection_thresh = 20.0;
   loop_closure_params_.pnp_ransac_iterations = 100;
+  loop_closure_params_.keyframe_queue_size = 5;
+  loop_closure_params_.max_yaw_diff = 25.0;
+  loop_closure_params_.max_position_diff = 15.0;
   resize_factor_ = 1.0;
 }
 
@@ -70,6 +75,41 @@ void Parameters::loadParameters(const std::string& config_file) {
     }
   }
 
+  if (fsSettings["loop_closure_params"]["keyframe_queue"].isInt()) {
+    const int keyframe_queue_size = static_cast<int>(fsSettings["loop_closure_params"]["keyframe_queue"]);
+    if (keyframe_queue_size == -1 || keyframe_queue_size > 0) {
+      loop_closure_params_.keyframe_queue_size = keyframe_queue_size;
+    } else {
+      LOG(WARNING) << "loop_closure_params.keyframe_queue must be -1 or greater than 0; keeping existing value "
+                   << loop_closure_params_.keyframe_queue_size;
+    }
+    LOG(INFO) << "Loop-closure keyframe queue size: " << loop_closure_params_.keyframe_queue_size;
+  }
+
+  if (fsSettings["loop_closure_params"]["max_yaw_diff"].isReal() ||
+      fsSettings["loop_closure_params"]["max_yaw_diff"].isInt()) {
+    const double max_yaw_diff = static_cast<double>(fsSettings["loop_closure_params"]["max_yaw_diff"]);
+    if (std::isfinite(max_yaw_diff) && max_yaw_diff > 0.0) {
+      loop_closure_params_.max_yaw_diff = max_yaw_diff;
+    } else {
+      LOG(WARNING) << "loop_closure_params.max_yaw_diff must be greater than 0; keeping existing value "
+                   << loop_closure_params_.max_yaw_diff;
+    }
+    LOG(INFO) << "Maximum loop-closure yaw difference: " << loop_closure_params_.max_yaw_diff << " deg";
+  }
+
+  if (fsSettings["loop_closure_params"]["max_position_diff"].isReal() ||
+      fsSettings["loop_closure_params"]["max_position_diff"].isInt()) {
+    const double max_position_diff = static_cast<double>(fsSettings["loop_closure_params"]["max_position_diff"]);
+    if (std::isfinite(max_position_diff) && max_position_diff > 0.0) {
+      loop_closure_params_.max_position_diff = max_position_diff;
+    } else {
+      LOG(WARNING) << "loop_closure_params.max_position_diff must be greater than 0; keeping existing value "
+                   << loop_closure_params_.max_position_diff;
+    }
+    LOG(INFO) << "Maximum loop-closure position difference: " << loop_closure_params_.max_position_diff << " m";
+  }
+
   // Determine source directory of this file
   std::filesystem::path this_file(__FILE__);
   std::filesystem::path package_src_dir = this_file.parent_path().parent_path().parent_path();  // Go up from src/pose_graph/
@@ -92,6 +132,21 @@ void Parameters::loadParameters(const std::string& config_file) {
       debug_mode_ = static_cast<int>(fsSettings["output_params"]["debug"]);
     }
   }
+
+  const cv::FileNode lc_diagnostic_node = fsSettings["output_params"]["lc_diagnostic"];
+  if (lc_diagnostic_node.isInt()) {
+    lc_diagnostic_ = static_cast<int>(lc_diagnostic_node) != 0;
+  } else if (lc_diagnostic_node.isString()) {
+    const std::string value = static_cast<std::string>(lc_diagnostic_node);
+    if (value == "true" || value == "True" || value == "TRUE") {
+      lc_diagnostic_ = true;
+    } else if (value == "false" || value == "False" || value == "FALSE") {
+      lc_diagnostic_ = false;
+    } else {
+      LOG(WARNING) << "output_params.lc_diagnostic must be true or false; keeping disabled";
+    }
+  }
+  LOG(INFO) << "Loop-closure diagnostics enabled: " << loopClosureDiagnosticsEnabled();
 
   if (fsSettings["global_map_params"]["enable"].isInt()) {
     global_mapping_params_.enabled = static_cast<int>(fsSettings["global_map_params"]["enable"]);

@@ -97,6 +97,7 @@ void LoopClosure::run() {
         stamp = keyframe_info->timestamp_;
         got_keyframe = true;
       }
+
       if (got_keyframe) {
         // VLOG(10) << "VIO keyframe at: " << stamp;
         uint32_t combined_kf_index = keyframe_info->keyframe_index_ + primitive_keyframes;

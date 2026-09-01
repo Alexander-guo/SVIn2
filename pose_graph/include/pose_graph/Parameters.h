@@ -11,6 +11,9 @@ struct LoopClosureParams {
   double pnp_reprojection_thresh;
   double pnp_ransac_iterations;
   int min_correspondences;
+  int keyframe_queue_size;
+  double max_yaw_diff;
+  double max_position_diff;
 };
 
 struct HealthParams {
@@ -55,8 +58,11 @@ class Parameters {
   std::vector<CameraCalibration, Eigen::aligned_allocator<CameraCalibration>> camera_calibrations_;
 
   bool debug_mode_ = false;
+  bool lc_diagnostic_ = false;
   std::string output_path_;
   std::string debug_output_path_;
+
+  bool loopClosureDiagnosticsEnabled() const { return debug_mode_ && lc_diagnostic_; }
 
   double image_delay_;
 
