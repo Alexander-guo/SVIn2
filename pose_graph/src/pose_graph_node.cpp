@@ -36,6 +36,8 @@ void setupLoopClosureDebugOutputs(const std::string& base_path, bool initialize_
   for (const auto& entry : std::filesystem::directory_iterator(output_dir)) {
     std::filesystem::remove_all(entry.path());
   }
+  std::filesystem::create_directories(output_dir + "/passed");
+  std::filesystem::create_directories(output_dir + "/rejected");
 
   output_dir = base_path + "/loop_closure/";
   if (!std::filesystem::is_directory(output_dir) || !std::filesystem::exists(output_dir)) {

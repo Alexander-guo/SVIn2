@@ -641,6 +641,43 @@ bool Keyframe::findConnection(Keyframe* old_kf) {
   Eigen::Vector3d relative_t;
   Eigen::Quaterniond relative_q;
   double relative_yaw;
+  cv::Mat pnp_verified_image;
+
+  const auto savePnpVerifiedImage = [&](const std::string& decision, bool accepted) {
+    if (!params_.debug_mode_ || pnp_verified_image.empty()) {
+      return;
+    }
+
+    cv::Mat notation(90, pnp_verified_image.cols, CV_8UC3, cv::Scalar(255, 255, 255));
+    putText(notation,
+            "current frame: " + std::to_string(index),
+            cv::Point2f(20, 30),
+            cv::FONT_HERSHEY_SIMPLEX,
+            1,
+            cv::Scalar(0),
+            3);
+    putText(notation,
+            "previous frame: " + std::to_string(old_kf->index),
+            cv::Point2f(20 + pnp_verified_image.cols / 2, 30),
+            cv::FONT_HERSHEY_SIMPLEX,
+            1,
+            cv::Scalar(0),
+            3);
+    putText(notation,
+            "decision: " + decision,
+            cv::Point2f(20, 72),
+            cv::FONT_HERSHEY_SIMPLEX,
+            1,
+            accepted ? cv::Scalar(0, 128, 0) : cv::Scalar(0, 0, 255),
+            3);
+    cv::vconcat(notation, pnp_verified_image, pnp_verified_image);
+
+    const std::string classification = accepted ? "passed" : "rejected";
+    const std::string output_dir = params_.debug_output_path_ + "/pnp_verified/" + classification + "/";
+    const std::string filename = output_dir + "pnp_verified_" + std::to_string(index) + "_" +
+                                 std::to_string(old_kf->index) + ".jpg";
+    UtilsOpenCV::writeCompressedDebugImage(filename, pnp_verified_image);
+  };
 
   if (static_cast<int>(matched_2d_cur.size()) > params_.loop_closure_params_.min_correspondences) {
     diagnostic.pnp_attempted = true;
@@ -655,29 +692,8 @@ bool Keyframe::findConnection(Keyframe* old_kf) {
     diagnostic.pnp_inliers = matched_2d_cur.size();
 
     if (params_.debug_mode_) {
-      cv::Mat pnp_verified_image =
+      pnp_verified_image =
           UtilsOpenCV::DrawCornersMatches(image, matched_2d_cur, old_kf->image, matched_2d_old, true);
-      cv::Mat notation(50, pnp_verified_image.cols, CV_8UC3, cv::Scalar(255, 255, 255));
-      putText(notation,
-              "current frame: " + std::to_string(index),
-              cv::Point2f(20, 30),
-              cv::FONT_HERSHEY_SIMPLEX,
-              1,
-              cv::Scalar(255),
-              3);
-
-      putText(notation,
-              "previous frame: " + std::to_string(old_kf->index),
-              cv::Point2f(20 + pnp_verified_image.cols / 2, 30),
-              cv::FONT_HERSHEY_SIMPLEX,
-              1,
-              cv::Scalar(255),
-              3);
-      cv::vconcat(notation, pnp_verified_image, pnp_verified_image);
-      std::string pnp_verified_dir = params_.debug_output_path_ + "/pnp_verified/";
-      std::string filename =
-          pnp_verified_dir + "pnp_verified_" + std::to_string(index) + "_" + std::to_string(old_kf->index) + ".jpg";
-      UtilsOpenCV::writeCompressedDebugImage(filename, pnp_verified_image);
     }
   }
 
@@ -735,6 +751,7 @@ bool Keyframe::findConnection(Keyframe* old_kf) {
           relative_q.z(), relative_yaw;
       diagnostic.accepted = true;
       diagnostic.rejection_reason = "accepted";
+      savePnpVerifiedImage(diagnostic.rejection_reason, true);
       if (params_.loopClosureDiagnosticsEnabled()) {
         appendLoopClosureFunnelRecord(params_.debug_output_path_, diagnostic);
       }
@@ -756,6 +773,7 @@ bool Keyframe::findConnection(Keyframe* old_kf) {
   } else {
     diagnostic.rejection_reason = "position_gate_failed";
   }
+  savePnpVerifiedImage(diagnostic.rejection_reason, false);
   if (params_.loopClosureDiagnosticsEnabled()) {
     appendLoopClosureFunnelRecord(params_.debug_output_path_, diagnostic);
   }
