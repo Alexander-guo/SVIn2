@@ -158,6 +158,11 @@ void VioParametersReader::readConfigFile(const std::string& filename) {
       const bool valid = parseBoolean(diagnosticsOptions["reprojection"], vioParameters_.diagnostics.reprojection);
       OKVIS_ASSERT_TRUE(Exception, valid, "'diagnostics_options.reprojection' must be boolean.");
     }
+    if (!diagnosticsOptions["crossCameraMatching"].empty()) {
+      const bool valid = parseBoolean(diagnosticsOptions["crossCameraMatching"],
+                                      vioParameters_.diagnostics.crossCameraMatching);
+      OKVIS_ASSERT_TRUE(Exception, valid, "'diagnostics_options.crossCameraMatching' must be boolean.");
+    }
   }
   // minimum ceres iterations
   if (file["ceres_options"]["minIterations"].isInt()) {
@@ -278,6 +283,13 @@ void VioParametersReader::readConfigFile(const std::string& filename) {
     vioParameters_.sensors_information.frameTimestampTolerance = 0.2 / vioParameters_.sensors_information.cameraRate;
     LOG(WARNING) << "No timestamp tolerance for stereo frames specified. Setting to "
                  << vioParameters_.sensors_information.frameTimestampTolerance;
+  }
+
+  const cv::FileNode enableCrossCameraMatching = file["camera_params"]["enable_cross_camera_matching"];
+  if (!enableCrossCameraMatching.empty()) {
+    const bool valid =
+        parseBoolean(enableCrossCameraMatching, vioParameters_.sensors_information.enableCrossCameraMatching);
+    OKVIS_ASSERT_TRUE(Exception, valid, "'camera_params.enable_cross_camera_matching' must be boolean.");
   }
 
   // camera params

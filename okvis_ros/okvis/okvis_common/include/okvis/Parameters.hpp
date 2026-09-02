@@ -321,6 +321,7 @@ struct DiagnosticsParameters {
   bool bearingTracking = false;    ///< Bearing-track and bearing-RANSAC diagnostics.
   bool triangulation = false;      ///< Probabilistic stereo-triangulation diagnostics.
   bool reprojection = false;       ///< Invalid reprojection detail diagnostics.
+  bool crossCameraMatching = false;  ///< Same-timestamp cross-camera matching summaries.
 };
 
 /**
@@ -331,6 +332,7 @@ struct SensorsInformation {
   double imageDelay;               ///< Camera image delay. [s]
   int imuIdx;                      ///< IMU index. Anything other than 0 will probably not work.
   double frameTimestampTolerance;  ///< Time tolerance between frames to accept them as stereo frames. [s]
+  bool enableCrossCameraMatching = true;  ///< Match different cameras in one synchronized MultiFrame.
 };
 
 /// @brief Some visualization settings.

@@ -51,6 +51,7 @@
 
 // cameras and distortions
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <iomanip>
@@ -713,10 +714,41 @@ void Frontend::matchStereo(okvis::Estimator& estimator,
       // first, check the possibility for overlap
       // TODO(test): implement this in the Multiframe.
 
-      // check overlap
-      if (!multiFrame->hasOverlap(im0, im1)) {
+      // Keep the policy separate from calibrated visibility: an opposing pair
+      // may have a tiny formal overlap that is unsuitable for feature matching.
+      const bool hasOverlap = multiFrame->hasOverlap(im0, im1);
+      const bool crossCameraDiagnostics = params.diagnostics.crossCameraMatching;
+      size_t overlapPixels = 0;
+      size_t overlapTotalPixels = 0;
+      double overlapFraction = 0.0;
+      if (crossCameraDiagnostics && hasOverlap) {
+        const cv::Mat overlapMask = multiFrame->overlap(im0, im1);
+        overlapPixels = overlapMask.empty() ? 0 : static_cast<size_t>(cv::countNonZero(overlapMask));
+        overlapTotalPixels = overlapMask.empty() ? 0 : overlapMask.total();
+        overlapFraction = overlapTotalPixels == 0
+                              ? 0.0
+                              : static_cast<double>(overlapPixels) / overlapTotalPixels;
+      }
+
+      if (!params.sensors_information.enableCrossCameraMatching || !hasOverlap) {
+        if (crossCameraDiagnostics) {
+          LOG(INFO) << std::setprecision(17) << "[CROSS_CAMERA_MATCH_DIAGNOSTIC]"
+                    << " timestamp=" << multiFrame->timestamp().toSec() << " frame=" << mfId
+                    << " camera_a=" << im0 << " camera_b=" << im1
+                    << " enabled=" << params.sensors_information.enableCrossCameraMatching
+                    << " has_overlap=" << hasOverlap << " overlap_pixels=" << overlapPixels
+                    << " overlap_total_pixels=" << overlapTotalPixels
+                    << " overlap_fraction=" << overlapFraction
+                    << " keypoints_a=" << multiFrame->numKeypoints(im0)
+                    << " keypoints_b=" << multiFrame->numKeypoints(im1)
+                    << " matches_2d2d=0 bearing_only=0 finite=0 promotions=0 rejected_2d2d=0"
+                    << " matches_3d2d_forward=0 matches_3d2d_reverse=0 runtime_ms=0";
+        }
         continue;
       }
+
+      std::chrono::steady_clock::time_point pairStart;
+      if (crossCameraDiagnostics) pairStart = std::chrono::steady_clock::now();
 
       MATCHING_ALGORITHM matchingAlgorithm(
           estimator,
@@ -729,14 +761,39 @@ void Frontend::matchStereo(okvis::Estimator& estimator,
 
       // match 2D-2D
       matcher_->match<MATCHING_ALGORITHM>(matchingAlgorithm);
+      const size_t matches2d2d = crossCameraDiagnostics ? matchingAlgorithm.numMatches() : 0;
+      const size_t bearingOnly = crossCameraDiagnostics ? matchingAlgorithm.numBearingOnlyMatches() : 0;
+      const size_t finite = crossCameraDiagnostics ? matchingAlgorithm.numFiniteMatches() : 0;
+      const size_t promotions = crossCameraDiagnostics ? matchingAlgorithm.numPromotions() : 0;
+      const size_t rejected2d2d = crossCameraDiagnostics ? matchingAlgorithm.numRejectedCandidates() : 0;
 
       // match 3D-2D
       matchingAlgorithm.setMatchingType(MATCHING_ALGORITHM::Match3D2D);
       matcher_->match<MATCHING_ALGORITHM>(matchingAlgorithm);
+      const size_t matches3d2dForward = crossCameraDiagnostics ? matchingAlgorithm.numMatches() : 0;
 
       // match 2D-3D
       matchingAlgorithm.setFrames(mfId, mfId, im1, im0);  // newest frame
       matcher_->match<MATCHING_ALGORITHM>(matchingAlgorithm);
+      const size_t matches3d2dReverse = crossCameraDiagnostics ? matchingAlgorithm.numMatches() : 0;
+
+      if (crossCameraDiagnostics) {
+        const double runtimeMs =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - pairStart).count();
+        LOG(INFO) << std::setprecision(17) << "[CROSS_CAMERA_MATCH_DIAGNOSTIC]"
+                  << " timestamp=" << multiFrame->timestamp().toSec() << " frame=" << mfId
+                  << " camera_a=" << im0 << " camera_b=" << im1 << " enabled=1 has_overlap=1"
+                  << " overlap_pixels=" << overlapPixels << " overlap_total_pixels=" << overlapTotalPixels
+                  << " overlap_fraction=" << overlapFraction
+                  << " keypoints_a=" << multiFrame->numKeypoints(im0)
+                  << " keypoints_b=" << multiFrame->numKeypoints(im1)
+                  << " matches_2d2d=" << matches2d2d << " bearing_only=" << bearingOnly
+                  << " finite=" << finite << " promotions=" << promotions
+                  << " rejected_2d2d=" << rejected2d2d
+                  << " matches_3d2d_forward=" << matches3d2dForward
+                  << " matches_3d2d_reverse=" << matches3d2dReverse
+                  << " runtime_ms=" << runtimeMs;
+      }
     }
   }
 

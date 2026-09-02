@@ -56,6 +56,7 @@ void copyWithoutRuntimeControls(std::istream& input, std::ostream& output) {
   bool skippingBlock = false;
   while (std::getline(input, line)) {
     if (line.rfind("finiteLandmarkRetention:", 0) == 0) continue;
+    if (line.find("    enable_cross_camera_matching:") == 0) continue;
     if (line == "threading_options:" || line == "diagnostics_options:") {
       skippingBlock = true;
       continue;
@@ -179,8 +180,14 @@ TEST(DetectionParameters, ReadsRuntimePolicyDiagnosticsAndThreadCounts) {
   std::ofstream output(temporary.path());
   ASSERT_TRUE(output.good());
   std::string line;
+  bool insertedCrossCameraPolicy = false;
+  bool insertedCrossCameraDiagnostic = false;
   while (std::getline(input, line)) {
-    if (line.find("    matcherThreads:") == 0) {
+    if (line.find("    camera_rate:") == 0) {
+      output << line << '\n';
+      output << "    enable_cross_camera_matching: false\n";
+      insertedCrossCameraPolicy = true;
+    } else if (line.find("    matcherThreads:") == 0) {
       output << "    matcherThreads: 8\n";
     } else if (line.find("    estimatorThreads:") == 0) {
       output << "    estimatorThreads: 4\n";
@@ -196,16 +203,21 @@ TEST(DetectionParameters, ReadsRuntimePolicyDiagnosticsAndThreadCounts) {
       output << "    triangulation: true\n";
     } else if (line.find("    reprojection:") == 0) {
       output << "    reprojection: true\n";
+      output << "    crossCameraMatching: true\n";
+      insertedCrossCameraDiagnostic = true;
     } else {
       output << line << '\n';
     }
   }
   output.close();
+  ASSERT_TRUE(insertedCrossCameraPolicy);
+  ASSERT_TRUE(insertedCrossCameraDiagnostic);
 
   const okvis::VioParameters parameters = readParameters(temporary.path());
   EXPECT_TRUE(parameters.optimization.finiteLandmarkRetention);
   EXPECT_EQ(parameters.threading.matcherThreads, 8);
   EXPECT_EQ(parameters.threading.estimatorThreads, 4);
+  EXPECT_FALSE(parameters.sensors_information.enableCrossCameraMatching);
   EXPECT_FALSE(parameters.diagnostics.drift);
   EXPECT_FALSE(parameters.diagnostics.retention);
   EXPECT_TRUE(parameters.diagnostics.image);
@@ -214,6 +226,7 @@ TEST(DetectionParameters, ReadsRuntimePolicyDiagnosticsAndThreadCounts) {
   EXPECT_TRUE(parameters.diagnostics.bearingTracking);
   EXPECT_TRUE(parameters.diagnostics.triangulation);
   EXPECT_TRUE(parameters.diagnostics.reprojection);
+  EXPECT_TRUE(parameters.diagnostics.crossCameraMatching);
 }
 
 TEST(DetectionParameters, UsesSafeRuntimeDefaultsWhenControlsAreOmitted) {
@@ -229,6 +242,7 @@ TEST(DetectionParameters, UsesSafeRuntimeDefaultsWhenControlsAreOmitted) {
   EXPECT_TRUE(parameters.optimization.finiteLandmarkRetention);
   EXPECT_EQ(parameters.threading.matcherThreads, 4);
   EXPECT_EQ(parameters.threading.estimatorThreads, 2);
+  EXPECT_TRUE(parameters.sensors_information.enableCrossCameraMatching);
   EXPECT_FALSE(parameters.diagnostics.drift);
   EXPECT_FALSE(parameters.diagnostics.retention);
   EXPECT_FALSE(parameters.diagnostics.image);
@@ -237,4 +251,5 @@ TEST(DetectionParameters, UsesSafeRuntimeDefaultsWhenControlsAreOmitted) {
   EXPECT_FALSE(parameters.diagnostics.bearingTracking);
   EXPECT_FALSE(parameters.diagnostics.triangulation);
   EXPECT_FALSE(parameters.diagnostics.reprojection);
+  EXPECT_FALSE(parameters.diagnostics.crossCameraMatching);
 }
