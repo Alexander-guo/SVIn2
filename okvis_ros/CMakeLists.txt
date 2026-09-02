@@ -24,6 +24,7 @@ find_package(nav_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
 find_package(visualization_msgs REQUIRED)
 find_package(image_transport REQUIRED)
+find_package(message_filters REQUIRED)
 find_package(pcl_conversions REQUIRED)
 # Sharmin: for SvinHealth msg
 rosidl_generate_interfaces(${PROJECT_NAME} "msg/SvinHealth.msg" "srv/OdometryTrigger.srv" DEPENDENCIES std_msgs geometry_msgs nav_msgs)
@@ -70,6 +71,7 @@ list(APPEND ament_libraries
         std_srvs
         visualization_msgs
         image_transport
+        message_filters
         pcl_conversions
 )
 
@@ -77,9 +79,11 @@ ament_export_dependencies(rosidl_default_runtime)
 
 
 add_library(${PROJECT_NAME}_lib STATIC src/Subscriber.cpp
+        src/PairedCompressedImageSubscriber.cpp
         src/Publisher.cpp
         src/RosParametersReader.cpp
         include/okvis/Subscriber.hpp
+        include/okvis/PairedCompressedImageSubscriber.hpp
         include/okvis/Publisher.hpp
         include/okvis/RosParametersReader.hpp)
 add_dependencies(${PROJECT_NAME}_lib okvis_multisensor_processing)
@@ -163,5 +167,19 @@ install(
         DESTINATION share/${PROJECT_NAME}
 )
 install(DIRECTORY ../rviz_config/ DESTINATION share/${PROJECT_NAME}/rviz_config/)
+
+if(BUILD_TESTING)
+    find_package(ament_cmake_gtest REQUIRED)
+    ament_add_gtest(paired_compressed_image_subscriber_test
+            test/PairedCompressedImageSubscriberTest.cpp)
+    target_link_libraries(paired_compressed_image_subscriber_test
+            ${PROJECT_NAME}_lib
+            ${OpenCV_LIBRARIES})
+    ament_target_dependencies(paired_compressed_image_subscriber_test
+            cv_bridge
+            message_filters
+            rclcpp
+            sensor_msgs)
+endif()
 
 ament_package()

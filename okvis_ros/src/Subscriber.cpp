@@ -48,6 +48,7 @@
 #include <limits>
 #include <memory>
 #include <okvis/Subscriber.hpp>
+#include <okvis/PairedCompressedImageSubscriber.hpp>
 #include <vector>
 
 #define THRESHOLD_DATA_DELAY_WARNING 0.1  // in seconds
@@ -89,19 +90,65 @@ Subscriber::Subscriber(std::shared_ptr<rclcpp::Node> node,
     }
   }
 
-  imgTransport_ = std::make_unique<image_transport::ImageTransport>(node);
-
   // setup callback groups
   auto svin2_callback_group = node->create_callback_group(rclcpp::CallbackGroupType::Reentrant);
   auto options = rclcpp::SubscriptionOptions();
   options.callback_group = svin2_callback_group;
 
-  // Set up Camera callbacks
-  for (size_t i = 0; i < vioParameters_.nCameraSystem.numCameras(); ++i) {
-    imageSubscribers_[i] =
-        imgTransport_->subscribe("camera" + std::to_string(i),
-                                 30 * vioParameters_.nCameraSystem.numCameras(),
-                                 std::bind(&Subscriber::imageCallback, this, std::placeholders::_1, i));
+  if (!node_->has_parameter("paired_compressed_images")) {
+    node_->declare_parameter<bool>("paired_compressed_images", false);
+  }
+  const bool pairedCompressedImages =
+      node_->get_parameter("paired_compressed_images").as_bool();
+  if (pairedCompressedImages) {
+    OKVIS_ASSERT_TRUE(
+        Exception, vioParameters_.nCameraSystem.numCameras() == 2,
+        "paired_compressed_images requires an OKVIS configuration with exactly two cameras");
+    if (!node_->has_parameter("paired_compressed_camera0_topic")) {
+      node_->declare_parameter<std::string>(
+          "paired_compressed_camera0_topic",
+          "/camera0/image_raw/compressed");
+    }
+    if (!node_->has_parameter("paired_compressed_camera1_topic")) {
+      node_->declare_parameter<std::string>(
+          "paired_compressed_camera1_topic",
+          "/camera1/image_raw/compressed");
+    }
+    if (!node_->has_parameter("paired_compressed_queue_size")) {
+      node_->declare_parameter<int>("paired_compressed_queue_size", 100);
+    }
+    if (!node_->has_parameter("paired_compressed_log_counters")) {
+      node_->declare_parameter<bool>("paired_compressed_log_counters", false);
+    }
+    const auto camera0Topic =
+        node_->get_parameter("paired_compressed_camera0_topic").as_string();
+    const auto camera1Topic =
+        node_->get_parameter("paired_compressed_camera1_topic").as_string();
+    const int64_t queueSize =
+        node_->get_parameter("paired_compressed_queue_size").as_int();
+    const bool logCounters =
+        node_->get_parameter("paired_compressed_log_counters").as_bool();
+    OKVIS_ASSERT_TRUE(Exception, queueSize > 0,
+                      "paired_compressed_queue_size must be positive");
+    pairedCompressedImageSubscriber_ =
+        std::make_unique<PairedCompressedImageSubscriber>(
+            node_, camera0Topic, camera1Topic,
+            static_cast<std::size_t>(queueSize),
+            [this](const sensor_msgs::msg::Image::ConstSharedPtr& message,
+                   unsigned int cameraIndex) {
+              return imageCallback(message, cameraIndex);
+            },
+            logCounters);
+  } else {
+    imgTransport_ = std::make_unique<image_transport::ImageTransport>(node);
+    // Generic raw-image/multicamera input remains unchanged when paired input
+    // is disabled.
+    for (size_t i = 0; i < vioParameters_.nCameraSystem.numCameras(); ++i) {
+      imageSubscribers_[i] =
+          imgTransport_->subscribe("camera" + std::to_string(i),
+                                   30 * vioParameters_.nCameraSystem.numCameras(),
+                                   std::bind(&Subscriber::imageCallback, this, std::placeholders::_1, i));
+    }
   }
 
   // Set up IMU callback
@@ -156,11 +203,11 @@ Subscriber::Subscriber(std::shared_ptr<rclcpp::Node> node,
 // Hunter
 void Subscriber::setT_Wc_W(okvis::kinematics::Transformation T_Wc_W) { vioParameters_.publishing.T_Wc_W = T_Wc_W; }
 
-void Subscriber::imageCallback(const sensor_msgs::msg::Image::ConstSharedPtr msg, unsigned int cameraIndex) {
+bool Subscriber::imageCallback(const sensor_msgs::msg::Image::ConstSharedPtr msg, unsigned int cameraIndex) {
   const auto callbackStart = driftDiagnosticsEnabled_ ? std::chrono::steady_clock::now()
                                                        : std::chrono::steady_clock::time_point{};
   if (frozen_) {
-    return;  // frozen: ignore images
+    return false;  // frozen: ignore images
   }
   const cv::Mat raw = readRosImage(msg);
 
@@ -273,7 +320,7 @@ void Subscriber::imageCallback(const sensor_msgs::msg::Image::ConstSharedPtr msg
   last_image_tp_ = std::chrono::steady_clock::now();
   seen_first_image_ = true;
 
-  //TODO(Guo): Investigate if frames are actually dropped,
+  //TODO(Guo): Frames are dropped, 
   // the warning becomes more and more frequent all the time as okvis proceeds.
   // The optional pre-histogram image is retained only on the opt-in diagnostic
   // path and is collapsed to one byte per surviving keypoint after description.
@@ -303,6 +350,7 @@ void Subscriber::imageCallback(const sensor_msgs::msg::Image::ConstSharedPtr msg
               << " input_loss_events=" << inputLossEvents
               << " add_image_false=" << !addedWithoutInputLoss;
   }
+  return addedWithoutInputLoss;
 }
 
 void Subscriber::imuCallback(const sensor_msgs::msg::Imu::SharedPtr msg) {

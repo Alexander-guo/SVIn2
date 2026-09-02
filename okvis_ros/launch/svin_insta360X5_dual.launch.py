@@ -23,7 +23,12 @@ def launch_setup(context, *args, **kwargs):
     name='okvis_node',
     parameters=[{
       'config_filename': abs_okvis_config_path,
-      'mesh_file': 'firefly.dae'
+      'mesh_file': 'firefly.dae',
+      'paired_compressed_images': True,
+      'paired_compressed_camera0_topic': '/insta360/front/image_raw/compressed',
+      'paired_compressed_camera1_topic': '/insta360/rear/image_raw/compressed',
+      'paired_compressed_queue_size': 100,
+      'paired_compressed_log_counters': LaunchConfiguration('paired_compressed_log_counters')
     }],
     remappings=[
       ('/camera0', '/cam0/image_raw'),
@@ -73,33 +78,14 @@ def generate_launch_description():
     default_value='true'
   )
 
-   # Uncompressor nodes
-  front_uncompressor_node = Node(
-    package='okvis_ros',
-    executable='uncompress_image',
-    name='front_uncompressor',
-    output='screen',
-    parameters=[{
-      'compressed_img_topic': '/insta360/front/image_raw/compressed',
-      'ouput_img_topic': '/cam0/image_raw'
-    }]
-  )
-
-  rear_uncompressor_node = Node(
-    package='okvis_ros',
-    executable='uncompress_image',
-    name='rear_uncompressor',
-    output='screen',
-    parameters=[{
-      'compressed_img_topic': '/insta360/rear/image_raw/compressed',
-      'ouput_img_topic': '/cam1/image_raw'
-    }]
+  paired_compressed_log_counters_arg = DeclareLaunchArgument(
+    'paired_compressed_log_counters',
+    default_value='false'
   )
 
   return LaunchDescription([
     config_arg,
     use_pose_graph_arg,
-    front_uncompressor_node,
-    rear_uncompressor_node,
+    paired_compressed_log_counters_arg,
     OpaqueFunction(function=launch_setup)
   ])

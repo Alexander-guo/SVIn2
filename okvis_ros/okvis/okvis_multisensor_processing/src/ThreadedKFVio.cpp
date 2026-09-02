@@ -91,7 +91,7 @@ namespace okvis {
 
 uint64_t frameCnt = 0;  // Sharmin
 
-static const int max_camera_input_queue_size = 10;
+static const int max_camera_input_queue_size = 15;
 static const okvis::Duration temporal_imu_data_overlap(
     0.02);  // overlap of imu data before and after two consecutive frames [seconds]
 
