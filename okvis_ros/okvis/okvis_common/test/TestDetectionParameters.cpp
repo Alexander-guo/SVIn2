@@ -57,7 +57,8 @@ void copyWithoutRuntimeControls(std::istream& input, std::ostream& output) {
   while (std::getline(input, line)) {
     if (line.rfind("finiteLandmarkRetention:", 0) == 0) continue;
     if (line.find("    enable_cross_camera_matching:") == 0) continue;
-    if (line == "threading_options:" || line == "diagnostics_options:") {
+    if (line == "threading_options:" || line == "diagnostics_options:" ||
+        line == "keyframe_selection:") {
       skippingBlock = true;
       continue;
     }
@@ -204,6 +205,7 @@ TEST(DetectionParameters, ReadsRuntimePolicyDiagnosticsAndThreadCounts) {
     } else if (line.find("    reprojection:") == 0) {
       output << "    reprojection: true\n";
       output << "    crossCameraMatching: true\n";
+      output << "    keyframeSelection: true\n";
       insertedCrossCameraDiagnostic = true;
     } else {
       output << line << '\n';
@@ -227,6 +229,7 @@ TEST(DetectionParameters, ReadsRuntimePolicyDiagnosticsAndThreadCounts) {
   EXPECT_TRUE(parameters.diagnostics.triangulation);
   EXPECT_TRUE(parameters.diagnostics.reprojection);
   EXPECT_TRUE(parameters.diagnostics.crossCameraMatching);
+  EXPECT_TRUE(parameters.diagnostics.keyframeSelection);
 }
 
 TEST(DetectionParameters, UsesSafeRuntimeDefaultsWhenControlsAreOmitted) {
@@ -252,4 +255,48 @@ TEST(DetectionParameters, UsesSafeRuntimeDefaultsWhenControlsAreOmitted) {
   EXPECT_FALSE(parameters.diagnostics.triangulation);
   EXPECT_FALSE(parameters.diagnostics.reprojection);
   EXPECT_FALSE(parameters.diagnostics.crossCameraMatching);
+  EXPECT_FALSE(parameters.diagnostics.keyframeSelection);
+  EXPECT_FALSE(parameters.keyframeSelection.opposingMulticam);
+  EXPECT_EQ(parameters.keyframeSelection.minimumFrames, 3);
+  EXPECT_DOUBLE_EQ(parameters.keyframeSelection.minimumSeconds, 0.10);
+  EXPECT_EQ(parameters.keyframeSelection.maximumFrames, 15);
+  EXPECT_DOUBLE_EQ(parameters.keyframeSelection.maximumSeconds, 0.75);
+  EXPECT_EQ(parameters.keyframeSelection.unhealthyConsecutiveFrames, 2);
+  EXPECT_EQ(parameters.keyframeSelection.minimumAssociated, 30);
+  EXPECT_DOUBLE_EQ(parameters.keyframeSelection.minimumBearingCoverage, 0.30);
+  EXPECT_DOUBLE_EQ(parameters.keyframeSelection.minimumBearingScatter, 0.15);
+  EXPECT_DOUBLE_EQ(parameters.keyframeSelection.minimumPersistentThreeFraction, 0.10);
+}
+
+TEST(DetectionParameters, ReadsOpposingMulticamKeyframePolicy) {
+  std::ifstream input(OKVIS_TEST_X5_CONFIG);
+  ASSERT_TRUE(input.good());
+  TemporaryConfig temporary;
+  std::ofstream output(temporary.path());
+  ASSERT_TRUE(output.good());
+  output << input.rdbuf();
+  output << "\nkeyframe_selection:\n"
+         << "    opposingMulticam: true\n"
+         << "    minimumFrames: 4\n"
+         << "    minimumSeconds: 0.2\n"
+         << "    maximumFrames: 18\n"
+         << "    maximumSeconds: 0.9\n"
+         << "    unhealthyConsecutiveFrames: 3\n"
+         << "    minimumAssociated: 35\n"
+         << "    minimumBearingCoverage: 0.32\n"
+         << "    minimumBearingScatter: 0.17\n"
+         << "    minimumPersistentThreeFraction: 0.12\n";
+  output.close();
+
+  const okvis::VioParameters parameters = readParameters(temporary.path());
+  EXPECT_TRUE(parameters.keyframeSelection.opposingMulticam);
+  EXPECT_EQ(parameters.keyframeSelection.minimumFrames, 4);
+  EXPECT_DOUBLE_EQ(parameters.keyframeSelection.minimumSeconds, 0.2);
+  EXPECT_EQ(parameters.keyframeSelection.maximumFrames, 18);
+  EXPECT_DOUBLE_EQ(parameters.keyframeSelection.maximumSeconds, 0.9);
+  EXPECT_EQ(parameters.keyframeSelection.unhealthyConsecutiveFrames, 3);
+  EXPECT_EQ(parameters.keyframeSelection.minimumAssociated, 35);
+  EXPECT_DOUBLE_EQ(parameters.keyframeSelection.minimumBearingCoverage, 0.32);
+  EXPECT_DOUBLE_EQ(parameters.keyframeSelection.minimumBearingScatter, 0.17);
+  EXPECT_DOUBLE_EQ(parameters.keyframeSelection.minimumPersistentThreeFraction, 0.12);
 }

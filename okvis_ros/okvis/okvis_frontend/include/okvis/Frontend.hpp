@@ -335,7 +335,15 @@ class Frontend : public VioFrontendInterface {
    * @return True if it should be a new keyframe.
    */
   bool doWeNeedANewKeyframe(const okvis::Estimator& estimator,
-                            std::shared_ptr<okvis::MultiFrame> currentFrame);  // based on some overlap area heuristics
+                            std::shared_ptr<okvis::MultiFrame> currentFrame,
+                            const KeyframeSelectionParameters& policy,
+                            bool diagnosticsEnabled = false,
+                            int matchesToKeyframes = 0);  // based on some overlap area heuristics
+
+  size_t processedFramesSinceKeyframe_ = 0;
+  bool keyframeTimestampAvailable_ = false;
+  double lastKeyframeTimestampSeconds_ = 0.0;
+  size_t opposingMulticamUnhealthyStreak_ = 0;
 
   /**
    * @brief Match a new multiframe to existing keyframes

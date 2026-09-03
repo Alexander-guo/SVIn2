@@ -41,10 +41,12 @@
  */
 
 #include <brisk/brisk.h>
+#include <Eigen/Eigenvalues>
 #include <glog/logging.h>
 
 #include <okvis/Frontend.hpp>
 #include <okvis/IdProvider.hpp>
+#include <okvis/OpposingMulticamKeyframePolicy.hpp>
 #include <okvis/VioKeyframeWindowMatchingAlgorithm.hpp>
 #include <okvis/ceres/ImuError.hpp>
 #include <opencv2/imgproc/imgproc.hpp>
@@ -68,6 +70,8 @@
 #include <okvis/cameras/RadialTangentialDistortion8.hpp>
 #include <okvis/RansacPoseDiagnostics.hpp>
 #include <sstream>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 // Kneip RANSAC
 #include <opengv/sac/Ransac.hpp>
@@ -109,6 +113,78 @@ size_t finiteSupportInCurrentFrame(const Estimator& estimator,
   }
   return count;
 }
+
+constexpr int kBearingCubemapBinsPerAxis = 8;
+
+int bearingCubemapBin(const Eigen::Vector3d& bearing) {
+  if (!bearing.allFinite() || !(bearing.norm() > 1.0e-12)) return -1;
+  const Eigen::Vector3d ray = bearing.normalized();
+  const Eigen::Array3d absolute = ray.array().abs();
+  int majorAxis = 0;
+  if (absolute.y() > absolute.x()) majorAxis = 1;
+  if (absolute.z() > absolute[majorAxis]) majorAxis = 2;
+
+  const double major = absolute[majorAxis];
+  if (!(major > 0.0)) return -1;
+  const int face = 2 * majorAxis + (ray[majorAxis] < 0.0 ? 1 : 0);
+  double u = 0.0;
+  double v = 0.0;
+  if (majorAxis == 0) {
+    u = ray.y() / major;
+    v = ray.z() / major;
+  } else if (majorAxis == 1) {
+    u = ray.x() / major;
+    v = ray.z() / major;
+  } else {
+    u = ray.x() / major;
+    v = ray.y() / major;
+  }
+
+  const auto quantize = [](double coordinate) {
+    const double normalized = 0.5 * (std::max(-1.0, std::min(1.0, coordinate)) + 1.0);
+    return std::min(kBearingCubemapBinsPerAxis - 1,
+                    static_cast<int>(normalized * kBearingCubemapBinsPerAxis));
+  };
+  const int binU = quantize(u);
+  const int binV = quantize(v);
+  return face * kBearingCubemapBinsPerAxis * kBearingCubemapBinsPerAxis +
+         binV * kBearingCubemapBinsPerAxis + binU;
+}
+
+double bearingScatter(const Eigen::Matrix3d& secondMomentSum, size_t count) {
+  if (count < 3) return -1.0;
+  const Eigen::Matrix3d secondMoment = secondMomentSum / static_cast<double>(count);
+  const Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> solver(secondMoment,
+                                                              Eigen::EigenvaluesOnly);
+  if (solver.info() != Eigen::Success || !solver.eigenvalues().allFinite()) return -1.0;
+  return std::max(0.0, std::min(1.0, 3.0 * solver.eigenvalues().minCoeff()));
+}
+
+template <typename T>
+double percentile(std::vector<T> values, double fraction) {
+  if (values.empty()) return 0.0;
+  std::sort(values.begin(), values.end());
+  const double position = fraction * static_cast<double>(values.size() - 1);
+  const size_t lower = static_cast<size_t>(std::floor(position));
+  const size_t upper = static_cast<size_t>(std::ceil(position));
+  const double weight = position - static_cast<double>(lower);
+  return (1.0 - weight) * static_cast<double>(values[lower]) +
+         weight * static_cast<double>(values[upper]);
+}
+
+struct TrackHistory {
+  size_t priorFrames = 0;
+  double earliestTimestamp = std::numeric_limits<double>::infinity();
+};
+
+struct KeyframeCameraSupport {
+  size_t associated = 0;
+  size_t persistentThreeFrames = 0;
+  size_t total = 0;
+  double bearingCoverage = 0.0;
+  double bearingScatter = -1.0;
+  bool healthy = false;
+};
 
 struct PendingIntensityCounts {
   size_t total = 0;
@@ -334,7 +410,11 @@ bool Frontend::dataAssociationAndInitialization(
     }
 
     // keyframe decision, at the moment only landmarks that match with keyframe are initialised
-    *asKeyframe = *asKeyframe || doWeNeedANewKeyframe(estimator, framesInOut);
+    *asKeyframe = *asKeyframe ||
+                  doWeNeedANewKeyframe(estimator, framesInOut,
+                                       params.keyframeSelection,
+                                       params.diagnostics.keyframeSelection,
+                                       numMatchesToKeyframes);
 
     // match to last frame
     int numMatchesToLastFrame = 0;
@@ -384,6 +464,31 @@ bool Frontend::dataAssociationAndInitialization(
     matchToLastFrameTimer.stop();
   } else {
     *asKeyframe = true;  // first frame needs to be keyframe
+    processedFramesSinceKeyframe_ = 0;
+    keyframeTimestampAvailable_ = true;
+    lastKeyframeTimestampSeconds_ = framesInOut->timestamp().toSec();
+    opposingMulticamUnhealthyStreak_ = 0;
+    if (params.diagnostics.keyframeSelection) {
+      LOG(INFO) << std::fixed << std::setprecision(6)
+                << "KEYFRAME_SELECTION frame=" << framesInOut->id()
+                << " timestamp=" << framesInOut->timestamp().toSec()
+                << " decision=insert reason=first_frame"
+                << " policy="
+                << (params.keyframeSelection.opposingMulticam ? "opposing_multicam" : "legacy")
+                << " initialized=" << (isInitialized_ ? 1 : 0)
+                << " estimator_frames=" << estimator.numFrames()
+                << " estimator_states=" << estimator.stateCount_
+                << " matches_to_keyframes=0"
+                << " aggregate_overlap=0 aggregate_ratio=0"
+                << " overlap_camera=-1 ratio_camera=-1"
+                << " overlap_threshold=" << keyframeInsertionOverlapThreshold_
+                << " ratio_threshold=" << keyframeInsertionMatchingRatioThreshold_
+                << " last_keyframe=0 frame_spacing_available=0 frames_since_keyframe=0"
+                << " processed_frames_since_keyframe=0 elapsed_s=0 policy_elapsed_s=0"
+                << " unhealthy_streak=0"
+                << " pose_delta_available=0 translation_delta_m=0 rotation_delta_deg=0"
+                << " cameras=[]";
+    }
   }
   // do stereo match to get new landmarks
   TimerSwitchable matchStereoTimer("2.4.3 matchStereo");
@@ -445,18 +550,146 @@ bool Frontend::propagation(const okvis::ImuMeasurementDeque& imuMeasurements,
 
 // Decision whether a new frame should be keyframe or not.
 bool Frontend::doWeNeedANewKeyframe(const okvis::Estimator& estimator,
-                                    std::shared_ptr<okvis::MultiFrame> currentFrame) {
+                                    std::shared_ptr<okvis::MultiFrame> currentFrame,
+                                    const KeyframeSelectionParameters& policy,
+                                    bool diagnosticsEnabled,
+                                    int matchesToKeyframes) {
+  ++processedFramesSinceKeyframe_;
+  const double policyElapsedSeconds = keyframeTimestampAvailable_
+                                          ? currentFrame->timestamp().toSec() -
+                                                lastKeyframeTimestampSeconds_
+                                          : 0.0;
+  const auto logDecision = [&](const char* reason,
+                               bool insert,
+                               double overlap,
+                               double ratio,
+                               int overlapCamera,
+                               int ratioCamera,
+                               const std::string& cameraDetails) {
+    if (!diagnosticsEnabled) return;
+
+    uint64_t lastKeyframeId = 0;
+    double elapsedSeconds = 0.0;
+    double translationMeters = 0.0;
+    double rotationDegrees = 0.0;
+    bool spacingAvailable = false;
+    size_t framesSinceKeyframe = 0;
+    bool frameSpacingAvailable = false;
+    if (estimator.numFrames() > 0) {
+      lastKeyframeId = estimator.currentKeyframeId();
+      const uint64_t currentFrameId = currentFrame->id();
+      elapsedSeconds = (currentFrame->timestamp() - estimator.timestamp(lastKeyframeId)).toSec();
+      for (size_t age = 0; age < estimator.numFrames(); ++age) {
+        if (estimator.frameIdByAge(age) == lastKeyframeId) {
+          framesSinceKeyframe = age;
+          frameSpacingAvailable = true;
+          break;
+        }
+      }
+      okvis::kinematics::Transformation T_WS_current;
+      okvis::kinematics::Transformation T_WS_keyframe;
+      if (estimator.get_T_WS(currentFrameId, T_WS_current) &&
+          estimator.get_T_WS(lastKeyframeId, T_WS_keyframe)) {
+        translationMeters = (T_WS_current.r() - T_WS_keyframe.r()).norm();
+        rotationDegrees = T_WS_current.q().angularDistance(T_WS_keyframe.q()) * 180.0 / M_PI;
+        spacingAvailable = true;
+      }
+    }
+
+    LOG(INFO) << std::fixed << std::setprecision(6)
+              << "KEYFRAME_SELECTION frame=" << currentFrame->id()
+              << " timestamp=" << currentFrame->timestamp().toSec()
+              << " decision=" << (insert ? "insert" : "skip")
+              << " reason=" << reason
+              << " policy=" << (policy.opposingMulticam ? "opposing_multicam" : "legacy")
+              << " initialized=" << (isInitialized_ ? 1 : 0)
+              << " estimator_frames=" << estimator.numFrames()
+              << " estimator_states=" << estimator.stateCount_
+              << " matches_to_keyframes=" << matchesToKeyframes
+              << " aggregate_overlap=" << overlap
+              << " aggregate_ratio=" << ratio
+              << " overlap_camera=" << overlapCamera
+              << " ratio_camera=" << ratioCamera
+              << " overlap_threshold=" << keyframeInsertionOverlapThreshold_
+              << " ratio_threshold=" << keyframeInsertionMatchingRatioThreshold_
+              << " last_keyframe=" << lastKeyframeId
+              << " frame_spacing_available=" << (frameSpacingAvailable ? 1 : 0)
+              << " frames_since_keyframe=" << framesSinceKeyframe
+              << " processed_frames_since_keyframe=" << processedFramesSinceKeyframe_
+              << " elapsed_s=" << elapsedSeconds
+              << " policy_elapsed_s=" << policyElapsedSeconds
+              << " unhealthy_streak=" << opposingMulticamUnhealthyStreak_
+              << " pose_delta_available=" << (spacingAvailable ? 1 : 0)
+              << " translation_delta_m=" << translationMeters
+              << " rotation_delta_deg=" << rotationDegrees
+              << " cameras=[" << cameraDetails << "]";
+  };
+  const auto recordInsertion = [&]() {
+    processedFramesSinceKeyframe_ = 0;
+    keyframeTimestampAvailable_ = true;
+    lastKeyframeTimestampSeconds_ = currentFrame->timestamp().toSec();
+    opposingMulticamUnhealthyStreak_ = 0;
+  };
+
   // Sharmin: Modified for Scale refinement
   // if (estimator.numFrames() < 2) {
   if (estimator.numFrames() < 2 || estimator.stateCount_ < 6) {
     // just starting, so yes, we need this as a new keyframe
+    logDecision("startup", true, 0.0, 0.0, -1, -1, "");
+    recordInsertion();
     return true;
   }
 
-  if (!isInitialized_) return false;
+  if (!isInitialized_) {
+    logDecision("not_initialized", false, 0.0, 0.0, -1, -1, "");
+    return false;
+  }
 
   double overlap = 0.0;
   double ratio = 0.0;
+  int overlapCamera = -1;
+  int ratioCamera = -1;
+  std::ostringstream cameraDetails;
+  const bool computeAdvancedSupport = diagnosticsEnabled || policy.opposingMulticam;
+  std::vector<KeyframeCameraSupport> cameraSupports;
+  if (computeAdvancedSupport) cameraSupports.reserve(currentFrame->numFrames());
+
+  // Diagnostics only: count the number of distinct active-window frames that
+  // carry each association ID. This treats pending bearing tracks and graph
+  // landmarks uniformly and does not assign any special role to a camera.
+  std::unordered_map<uint64_t, size_t> priorRigTrackFrames;
+  std::vector<std::unordered_map<uint64_t, TrackHistory>> priorCameraTrackHistory;
+  if (computeAdvancedSupport) {
+    priorCameraTrackHistory.resize(currentFrame->numFrames());
+    // Age zero is the current multiframe. Excluding it prevents same-time
+    // multicamera associations from masquerading as temporal persistence.
+    for (size_t age = 1; age < estimator.numFrames(); ++age) {
+      const std::shared_ptr<okvis::MultiFrame> activeFrame =
+          estimator.multiFrame(estimator.frameIdByAge(age));
+      std::unordered_set<uint64_t> idsInFrame;
+      for (size_t camera = 0; camera < activeFrame->numFrames(); ++camera) {
+        std::unordered_set<uint64_t> idsInCameraFrame;
+        for (size_t keypointIndex = 0;
+             keypointIndex < activeFrame->numKeypoints(camera);
+             ++keypointIndex) {
+          const uint64_t id = activeFrame->landmarkId(camera, keypointIndex);
+          if (id != 0) {
+            idsInFrame.insert(id);
+            idsInCameraFrame.insert(id);
+          }
+        }
+        if (camera < priorCameraTrackHistory.size()) {
+          for (const uint64_t id : idsInCameraFrame) {
+            TrackHistory& history = priorCameraTrackHistory[camera][id];
+            ++history.priorFrames;
+            history.earliestTimestamp =
+                std::min(history.earliestTimestamp, activeFrame->timestamp().toSec());
+          }
+        }
+      }
+      for (const uint64_t id : idsInFrame) ++priorRigTrackFrames[id];
+    }
+  }
 
   // go through all the frames and try to match the initialized keypoints
   for (size_t im = 0; im < currentFrame->numFrames(); ++im) {
@@ -466,6 +699,27 @@ bool Frontend::doWeNeedANewKeyframe(const okvis::Estimator& estimator,
     std::vector<Eigen::Vector4d, Eigen::aligned_allocator<Eigen::Vector4d> > frameBLandmarks;
 
     const size_t numB = currentFrame->numKeypoints(im);
+    size_t associated = 0;
+    size_t finite = 0;
+    size_t bearingValid = 0;
+    size_t persistentTwoFrames = 0;
+    size_t persistentThreeFrames = 0;
+    size_t crossCameraOnly = 0;
+    size_t trackFrameSum = 0;
+    size_t trackFrameMaximum = 0;
+    std::vector<size_t> trackFrameLengths;
+    std::vector<double> trackAgesSeconds;
+    Eigen::Matrix3d allBearingMoment = Eigen::Matrix3d::Zero();
+    Eigen::Matrix3d associatedBearingMoment = Eigen::Matrix3d::Zero();
+    Eigen::Matrix3d finiteBearingMoment = Eigen::Matrix3d::Zero();
+    Eigen::Matrix3d persistentBearingMoment = Eigen::Matrix3d::Zero();
+    size_t associatedBearingValid = 0;
+    size_t finiteBearingValid = 0;
+    size_t persistentBearingValid = 0;
+    std::set<int> allBearingBins;
+    std::set<int> associatedBearingBins;
+    std::set<int> finiteBearingBins;
+    std::set<int> persistentBearingBins;
     frameBPoints.reserve(numB);
     frameBLandmarks.reserve(numB);
     Eigen::Vector2d keypoint;
@@ -473,15 +727,136 @@ bool Frontend::doWeNeedANewKeyframe(const okvis::Estimator& estimator,
       currentFrame->getKeypoint(im, k, keypoint);
       // insert it
       frameBPoints.push_back(cv::Point2f(keypoint[0], keypoint[1]));
+      int bearingBin = -1;
+      Eigen::Vector3d unitBearing = Eigen::Vector3d::Zero();
+      if (computeAdvancedSupport) {
+        Eigen::Vector3d bearing;
+        if (currentFrame->geometry(im)->backProject(keypoint, &bearing)) {
+          bearingBin = bearingCubemapBin(bearing);
+          if (bearingBin >= 0) {
+            unitBearing = bearing.normalized();
+            ++bearingValid;
+            allBearingBins.insert(bearingBin);
+            allBearingMoment.noalias() += unitBearing * unitBearing.transpose();
+          }
+        }
+      }
       // also remember matches
       if (currentFrame->landmarkId(im, k) != 0) {
+        if (computeAdvancedSupport) {
+          ++associated;
+          const uint64_t landmarkId = currentFrame->landmarkId(im, k);
+          const auto trackIt = priorCameraTrackHistory[im].find(landmarkId);
+          const size_t priorCameraFrames =
+              trackIt == priorCameraTrackHistory[im].end() ? 0 : trackIt->second.priorFrames;
+          const size_t trackFrames = 1 + priorCameraFrames;
+          const auto rigTrackIt = priorRigTrackFrames.find(landmarkId);
+          const size_t priorRigFrames =
+              rigTrackIt == priorRigTrackFrames.end() ? 0 : rigTrackIt->second;
+          if (priorCameraFrames == 0 && priorRigFrames > 0) ++crossCameraOnly;
+          trackFrameSum += trackFrames;
+          trackFrameMaximum = std::max(trackFrameMaximum, trackFrames);
+          trackFrameLengths.push_back(trackFrames);
+          trackAgesSeconds.push_back(
+              priorCameraFrames == 0
+                  ? 0.0
+                  : currentFrame->timestamp().toSec() - trackIt->second.earliestTimestamp);
+          if (trackFrames >= 2) ++persistentTwoFrames;
+          if (trackFrames >= 3) ++persistentThreeFrames;
+          if (bearingBin >= 0) {
+            associatedBearingBins.insert(bearingBin);
+            ++associatedBearingValid;
+            associatedBearingMoment.noalias() += unitBearing * unitBearing.transpose();
+            if (trackFrames >= 2) {
+              persistentBearingBins.insert(bearingBin);
+              ++persistentBearingValid;
+              persistentBearingMoment.noalias() += unitBearing * unitBearing.transpose();
+            }
+          }
+          if (estimator.isLandmarkAdded(landmarkId) && estimator.isLandmarkInitialized(landmarkId)) {
+            ++finite;
+            if (bearingBin >= 0) {
+              finiteBearingBins.insert(bearingBin);
+              ++finiteBearingValid;
+              finiteBearingMoment.noalias() += unitBearing * unitBearing.transpose();
+            }
+          }
+        }
         frameBMatches.push_back(cv::Point2f(keypoint[0], keypoint[1]));
       }
     }
 
-    if (frameBPoints.size() < 3) continue;
+    double associatedCoverage = 0.0;
+    double associatedScatter = -1.0;
+    double persistentThreeFraction = 0.0;
+    bool cameraHealthy = false;
+    if (computeAdvancedSupport) {
+      associatedCoverage = safeRatio(associatedBearingBins.size(), allBearingBins.size());
+      associatedScatter = bearingScatter(associatedBearingMoment, associatedBearingValid);
+      persistentThreeFraction = safeRatio(persistentThreeFrames, numB);
+      cameraHealthy =
+          associated >= static_cast<size_t>(policy.minimumAssociated) &&
+          associatedCoverage >= policy.minimumBearingCoverage &&
+          associatedScatter >= policy.minimumBearingScatter &&
+          persistentThreeFraction >= policy.minimumPersistentThreeFraction;
+      cameraSupports.push_back({associated, persistentThreeFrames, numB,
+                                associatedCoverage, associatedScatter, cameraHealthy});
+    }
+
+    if (diagnosticsEnabled) {
+      if (im > 0) cameraDetails << ';';
+      cameraDetails << "cam=" << im
+                    << ",total=" << numB
+                    << ",associated=" << associated
+                    << ",finite=" << finite
+                    << ",bearing_only=" << (associated - finite)
+                    << ",bearing_valid=" << bearingValid
+                    << ",bearing_invalid=" << (numB - bearingValid)
+                    << ",bearing_grid_axis=" << kBearingCubemapBinsPerAxis
+                    << ",bearing_bins_all=" << allBearingBins.size()
+                    << ",bearing_bins_associated=" << associatedBearingBins.size()
+                    << ",bearing_bins_finite=" << finiteBearingBins.size()
+                    << ",bearing_bins_persistent2=" << persistentBearingBins.size()
+                    << ",bearing_coverage_associated="
+                    << associatedCoverage
+                    << ",bearing_coverage_finite="
+                    << safeRatio(finiteBearingBins.size(), allBearingBins.size())
+                    << ",bearing_coverage_persistent2="
+                    << safeRatio(persistentBearingBins.size(), allBearingBins.size())
+                    << ",bearing_scatter_all="
+                    << bearingScatter(allBearingMoment, bearingValid)
+                    << ",bearing_scatter_associated="
+                    << associatedScatter
+                    << ",bearing_scatter_finite="
+                    << bearingScatter(finiteBearingMoment, finiteBearingValid)
+                    << ",bearing_scatter_persistent2="
+                    << bearingScatter(persistentBearingMoment, persistentBearingValid)
+                    << ",persistent2=" << persistentTwoFrames
+                    << ",persistent3=" << persistentThreeFrames
+                    << ",persistent3_fraction_all=" << persistentThreeFraction
+                    << ",healthy=" << (cameraHealthy ? 1 : 0)
+                    << ",cross_camera_only=" << crossCameraOnly
+                    << ",persistent_fraction_associated="
+                    << safeRatio(persistentTwoFrames, associated)
+                    << ",track_frames_mean=" << safeRatio(trackFrameSum, associated)
+                    << ",track_frames_p50=" << percentile(trackFrameLengths, 0.5)
+                    << ",track_frames_p90=" << percentile(trackFrameLengths, 0.9)
+                    << ",track_frames_max=" << trackFrameMaximum
+                    << ",track_age_s_p50=" << percentile(trackAgesSeconds, 0.5)
+                    << ",track_age_s_p90=" << percentile(trackAgesSeconds, 0.9);
+    }
+
+    if (frameBPoints.size() < 3) {
+      if (diagnosticsEnabled)
+        cameraDetails << ",hull_status=insufficient_all,inside=0,overlap=0,ratio=0";
+      continue;
+    }
     cv::convexHull(frameBPoints, frameBHull);
-    if (frameBMatches.size() < 3) continue;
+    if (frameBMatches.size() < 3) {
+      if (diagnosticsEnabled)
+        cameraDetails << ",hull_status=insufficient_associated,inside=0,overlap=0,ratio=0";
+      continue;
+    }
     cv::convexHull(frameBMatches, frameBMatchesHull);
 
     // areas
@@ -501,16 +876,60 @@ bool Frontend::doWeNeedANewKeyframe(const okvis::Estimator& estimator,
     }
     double matchingRatio = static_cast<double>(frameBMatches.size()) / static_cast<double>(pointsInFrameBMatchesArea);
 
+    if (diagnosticsEnabled) {
+      cameraDetails << ",hull_status=valid"
+                    << ",inside=" << pointsInFrameBMatchesArea
+                    << ",overlap=" << overlapArea
+                    << ",ratio=" << matchingRatio;
+    }
+
     // calculate overlap score
+    if (overlapArea > overlap) overlapCamera = static_cast<int>(im);
+    if (matchingRatio > ratio) ratioCamera = static_cast<int>(im);
     overlap = std::max(overlapArea, overlap);
     ratio = std::max(matchingRatio, ratio);
   }
 
-  // take a decision
-  if (overlap > keyframeInsertionOverlapThreshold_ && ratio > keyframeInsertionMatchingRatioThreshold_)
+  if (policy.opposingMulticam) {
+    const bool rigHealthy = std::any_of(
+        cameraSupports.begin(), cameraSupports.end(),
+        [](const KeyframeCameraSupport& support) { return support.healthy; });
+    if (rigHealthy) {
+      opposingMulticamUnhealthyStreak_ = 0;
+    } else {
+      ++opposingMulticamUnhealthyStreak_;
+    }
+
+    const OpposingMulticamKeyframeDecision decision =
+        opposingMulticamKeyframeDecision(policy, processedFramesSinceKeyframe_,
+                                         keyframeTimestampAvailable_, policyElapsedSeconds,
+                                         rigHealthy, opposingMulticamUnhealthyStreak_);
+    const bool insert = opposingMulticamKeyframeInsert(decision);
+    logDecision(opposingMulticamKeyframeDecisionName(decision), insert,
+                overlap, ratio, overlapCamera, ratioCamera, cameraDetails.str());
+    if (insert) {
+      recordInsertion();
+      return true;
+    }
     return false;
-  else
+  }
+
+  // take a decision
+  if (overlap > keyframeInsertionOverlapThreshold_ && ratio > keyframeInsertionMatchingRatioThreshold_) {
+    logDecision("legacy_thresholds_satisfied", false, overlap, ratio,
+                overlapCamera, ratioCamera, cameraDetails.str());
+    return false;
+  } else {
+    const bool overlapSatisfied = overlap > keyframeInsertionOverlapThreshold_;
+    const bool ratioSatisfied = ratio > keyframeInsertionMatchingRatioThreshold_;
+    const char* reason = !overlapSatisfied && !ratioSatisfied
+                             ? "low_overlap_and_ratio"
+                             : (!overlapSatisfied ? "low_overlap" : "low_ratio");
+    logDecision(reason, true, overlap, ratio,
+                overlapCamera, ratioCamera, cameraDetails.str());
+    recordInsertion();
     return true;
+  }
 }
 
 // Match a new multiframe to existing keyframes

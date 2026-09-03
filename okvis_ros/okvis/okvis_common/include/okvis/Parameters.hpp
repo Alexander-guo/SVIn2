@@ -322,6 +322,22 @@ struct DiagnosticsParameters {
   bool triangulation = false;      ///< Probabilistic stereo-triangulation diagnostics.
   bool reprojection = false;       ///< Invalid reprojection detail diagnostics.
   bool crossCameraMatching = false;  ///< Same-timestamp cross-camera matching summaries.
+  bool keyframeSelection = false;  ///< Per-camera keyframe-selection inputs and decisions.
+};
+
+/// Opt-in keyframe policy for rigs whose cameras have little or no overlap.
+/// Defaults preserve the historical mono/stereo selector exactly.
+struct KeyframeSelectionParameters {
+  bool opposingMulticam = false;
+  int minimumFrames = 3;
+  double minimumSeconds = 0.10;
+  int maximumFrames = 15;
+  double maximumSeconds = 0.75;
+  int unhealthyConsecutiveFrames = 2;
+  int minimumAssociated = 30;
+  double minimumBearingCoverage = 0.30;
+  double minimumBearingScatter = 0.15;
+  double minimumPersistentThreeFraction = 0.10;
 };
 
 /**
@@ -374,6 +390,7 @@ struct VioParameters {
   Optimization optimization;                          ///< Optimization parameters.
   ThreadingParameters threading;                      ///< Internal worker counts.
   DiagnosticsParameters diagnostics;                  ///< Opt-in runtime diagnostics.
+  KeyframeSelectionParameters keyframeSelection;      ///< Keyframe policy and thresholds.
   Visualization visualization;                        ///< Visualization parameters.
   SensorsInformation sensors_information;             ///< Information on camera and IMU setup.
   ExtrinsicsEstimationParameters camera_extrinsics;   ///< Camera extrinsic estimation parameters.

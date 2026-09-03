@@ -41,6 +41,7 @@
 #include <glog/logging.h>
 
 #include <algorithm>
+#include <cmath>
 #include <memory>
 #include <okvis/VioParametersReader.hpp>
 #include <okvis/cameras/EquidistantDistortion.hpp>
@@ -163,7 +164,73 @@ void VioParametersReader::readConfigFile(const std::string& filename) {
                                       vioParameters_.diagnostics.crossCameraMatching);
       OKVIS_ASSERT_TRUE(Exception, valid, "'diagnostics_options.crossCameraMatching' must be boolean.");
     }
+    if (!diagnosticsOptions["keyframeSelection"].empty()) {
+      const bool valid = parseBoolean(diagnosticsOptions["keyframeSelection"],
+                                      vioParameters_.diagnostics.keyframeSelection);
+      OKVIS_ASSERT_TRUE(Exception, valid, "'diagnostics_options.keyframeSelection' must be boolean.");
+    }
   }
+
+  const cv::FileNode keyframeSelection = file["keyframe_selection"];
+  if (!keyframeSelection.empty()) {
+    if (!keyframeSelection["opposingMulticam"].empty()) {
+      const bool valid = parseBoolean(keyframeSelection["opposingMulticam"],
+                                      vioParameters_.keyframeSelection.opposingMulticam);
+      OKVIS_ASSERT_TRUE(Exception, valid,
+                        "'keyframe_selection.opposingMulticam' must be boolean.");
+    }
+    const auto readInteger = [&](const char* name, int& value) {
+      const cv::FileNode node = keyframeSelection[name];
+      if (node.empty()) return;
+      OKVIS_ASSERT_TRUE(Exception, node.isInt(),
+                        "'keyframe_selection." << name << "' must be an integer.");
+      node >> value;
+    };
+    const auto readReal = [&](const char* name, double& value) {
+      const cv::FileNode node = keyframeSelection[name];
+      if (node.empty()) return;
+      OKVIS_ASSERT_TRUE(Exception, node.isReal() || node.isInt(),
+                        "'keyframe_selection." << name << "' must be numeric.");
+      node >> value;
+    };
+    readInteger("minimumFrames", vioParameters_.keyframeSelection.minimumFrames);
+    readReal("minimumSeconds", vioParameters_.keyframeSelection.minimumSeconds);
+    readInteger("maximumFrames", vioParameters_.keyframeSelection.maximumFrames);
+    readReal("maximumSeconds", vioParameters_.keyframeSelection.maximumSeconds);
+    readInteger("unhealthyConsecutiveFrames",
+                vioParameters_.keyframeSelection.unhealthyConsecutiveFrames);
+    readInteger("minimumAssociated", vioParameters_.keyframeSelection.minimumAssociated);
+    readReal("minimumBearingCoverage",
+             vioParameters_.keyframeSelection.minimumBearingCoverage);
+    readReal("minimumBearingScatter",
+             vioParameters_.keyframeSelection.minimumBearingScatter);
+    readReal("minimumPersistentThreeFraction",
+             vioParameters_.keyframeSelection.minimumPersistentThreeFraction);
+  }
+  OKVIS_ASSERT_TRUE(Exception,
+                    vioParameters_.keyframeSelection.minimumFrames >= 0 &&
+                        vioParameters_.keyframeSelection.maximumFrames >=
+                            vioParameters_.keyframeSelection.minimumFrames,
+                    "keyframe-selection frame bounds are invalid.");
+  OKVIS_ASSERT_TRUE(Exception,
+                    std::isfinite(vioParameters_.keyframeSelection.minimumSeconds) &&
+                        std::isfinite(vioParameters_.keyframeSelection.maximumSeconds) &&
+                        vioParameters_.keyframeSelection.minimumSeconds >= 0.0 &&
+                        vioParameters_.keyframeSelection.maximumSeconds >=
+                            vioParameters_.keyframeSelection.minimumSeconds,
+                    "keyframe-selection time bounds are invalid.");
+  OKVIS_ASSERT_TRUE(Exception,
+                    vioParameters_.keyframeSelection.unhealthyConsecutiveFrames >= 1 &&
+                        vioParameters_.keyframeSelection.minimumAssociated >= 0,
+                    "keyframe-selection support counts are invalid.");
+  OKVIS_ASSERT_TRUE(Exception,
+                    vioParameters_.keyframeSelection.minimumBearingCoverage >= 0.0 &&
+                        vioParameters_.keyframeSelection.minimumBearingCoverage <= 1.0 &&
+                        vioParameters_.keyframeSelection.minimumBearingScatter >= 0.0 &&
+                        vioParameters_.keyframeSelection.minimumBearingScatter <= 1.0 &&
+                        vioParameters_.keyframeSelection.minimumPersistentThreeFraction >= 0.0 &&
+                        vioParameters_.keyframeSelection.minimumPersistentThreeFraction <= 1.0,
+                    "keyframe-selection normalized thresholds must be in [0, 1].");
   // minimum ceres iterations
   if (file["ceres_options"]["minIterations"].isInt()) {
     file["ceres_options"]["minIterations"] >> vioParameters_.optimization.min_iterations;

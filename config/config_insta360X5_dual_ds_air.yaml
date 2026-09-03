@@ -30,6 +30,8 @@ cameras:
 
 camera_params:
     camera_rate: 30
+    # Opposing fisheyes: rely on per-camera temporal tracks.
+    enable_cross_camera_matching: false
     sigma_absolute_translation: 0
     sigma_absolute_orientation: 0
     sigma_c_relative_translation: 0.0 # below 1.0e-6 ruines numerics...
@@ -75,6 +77,23 @@ diagnostics_options:
     bearingTracking: false
     triangulation: false
     reprojection: false
+    crossCameraMatching: false
+    keyframeSelection: false
+
+# Camera-symmetric policy for opposing fisheyes with little common overlap.
+# A camera is evaluated only from its own bearing-space support; either camera
+# may provide the healthy view on any frame.
+keyframe_selection:
+    opposingMulticam: true
+    minimumFrames: 3
+    minimumSeconds: 0.10
+    maximumFrames: 15
+    maximumSeconds: 0.75
+    unhealthyConsecutiveFrames: 2
+    minimumAssociated: 30
+    minimumBearingCoverage: 0.30
+    minimumBearingScatter: 0.15
+    minimumPersistentThreeFraction: 0.10
 
 # ceres optimization options
 ceres_options:
