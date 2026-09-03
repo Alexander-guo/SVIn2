@@ -53,7 +53,8 @@ if(BUILD_TESTS)
 
   add_executable(okvis_detection_parameters_test test/TestDetectionParameters.cpp)
   target_compile_definitions(okvis_detection_parameters_test PRIVATE
-    OKVIS_TEST_X5_CONFIG="${CMAKE_CURRENT_SOURCE_DIR}/../../../config/config_insta360X5_front_ds_air.yaml")
+    OKVIS_TEST_X5_CONFIG="${CMAKE_CURRENT_SOURCE_DIR}/../../../config/config_insta360X5_front_ds_air.yaml"
+    OKVIS_TEST_X5_DUAL_CONFIG="${CMAKE_CURRENT_SOURCE_DIR}/../../../config/config_insta360X5_dual_ds_air.yaml")
   target_link_libraries(okvis_detection_parameters_test
     ${PROJECT_NAME}
     gtest

@@ -104,6 +104,22 @@ inline void overlayInvalidCameraDomain50Percent(cv::Mat* bgrImage,
   blended.copyTo(*bgrImage, invalidMask);
 }
 
+/// Overlay invalid pixels in BGR blue at 30 percent opacity. This is used for
+/// user-configured exclusion masks, independently of the camera model domain.
+inline void overlayConfiguredCameraMask30PercentBlue(cv::Mat* bgrImage,
+                                                     const cv::Mat& validMask) {
+  if (!bgrImage || bgrImage->empty() || bgrImage->type() != CV_8UC3 ||
+      validMask.empty() || validMask.size() != bgrImage->size()) {
+    return;
+  }
+  const cv::Mat invalidMask = validMask == 0;
+  if (cv::countNonZero(invalidMask) == 0) return;
+  cv::Mat blueImage(bgrImage->size(), bgrImage->type(), cv::Scalar(150, 100, 0));
+  cv::Mat blended;
+  cv::addWeighted(*bgrImage, 0.7, blueImage, 0.3, 0.0, blended);
+  blended.copyTo(*bgrImage, invalidMask);
+}
+
 }  // namespace cameras
 }  // namespace okvis
 

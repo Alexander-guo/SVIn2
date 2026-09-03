@@ -176,9 +176,42 @@ cv::Mat VioVisualizer::drawMatches(VisualizationData::Ptr& data, size_t image_nu
     }
     cv::resize(colorImage, displayImage, cv::Size(width, kPanelHeight), 0.0, 0.0, cv::INTER_AREA);
     const cv::Mat validMask = okvis::cameras::cameraValidDomainMask(geometry, image.size());
-    cv::Mat displayValidMask;
-    cv::resize(validMask, displayValidMask, displayImage.size(), 0.0, 0.0, cv::INTER_NEAREST);
-    okvis::cameras::overlayInvalidCameraDomain50Percent(&displayImage, displayValidMask);
+    cv::Mat configuredValidMask(image.size(), CV_8UC1, cv::Scalar(255));
+    const bool hasCompatibleConfiguredMask =
+        geometry && geometry->hasMask() && geometry->mask().size() == image.size();
+    if (hasCompatibleConfiguredMask) {
+      cv::compare(geometry->mask(), 0, configuredValidMask, cv::CMP_EQ);
+    }
+
+    // Show projection-model exclusions at the historical 50% opacity, but the
+    // user-configured camera mask at 30% opacity. A configured mask takes
+    // precedence where the two invalid regions overlap.
+    cv::Mat combinedInvalidMask;
+    cv::bitwise_not(validMask, combinedInvalidMask);
+    cv::Mat modelOnlyInvalidMask;
+    cv::bitwise_and(combinedInvalidMask, configuredValidMask, modelOnlyInvalidMask);
+    cv::Mat modelOnlyValidMask;
+    cv::bitwise_not(modelOnlyInvalidMask, modelOnlyValidMask);
+    cv::Mat displayModelValidMask;
+    cv::resize(modelOnlyValidMask,
+               displayModelValidMask,
+               displayImage.size(),
+               0.0,
+               0.0,
+               cv::INTER_NEAREST);
+    okvis::cameras::overlayInvalidCameraDomain50Percent(&displayImage, displayModelValidMask);
+
+    if (hasCompatibleConfiguredMask) {
+      cv::Mat displayConfiguredValidMask;
+      cv::resize(configuredValidMask,
+                 displayConfiguredValidMask,
+                 displayImage.size(),
+                 0.0,
+                 0.0,
+                 cv::INTER_NEAREST);
+      okvis::cameras::overlayConfiguredCameraMask30PercentBlue(
+          &displayImage, displayConfiguredValidMask);
+    }
   };
 
   cv::Mat grayImage;
