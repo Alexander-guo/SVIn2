@@ -19,33 +19,59 @@ Subscriber::Subscriber(std::shared_ptr<rclcpp::Node> node, Parameters& params) :
   svin_health_topic_ = "/svin_health";
   primitive_estimator_topic_ = "/aqua_primitive_estimator/odometry";
   last_image_time_ = -1;
-  raw_image_topic_ = "/cam0/image_raw";
 
   rclcpp::QoS qos(10);
   auto rmw_qos_profile = qos.get_rmw_qos_profile();
 
-  keyframe_image_subscriber_.subscribe(node_, kf_image_topic_, rmw_qos_profile);
   keyframe_points_subscriber_.subscribe(node_, kf_points_topic_, rmw_qos_profile);
   keyframe_pose_subscriber_.subscribe(node_, kf_pose_topic_, rmw_qos_profile);
   svin_health_subscriber_.subscribe(node_, svin_health_topic_, rmw_qos_profile);
 
   static constexpr size_t kMaxKeyframeSynchronizerQueueSize = 10u;
-  sync_keyframe_ = std::make_unique<message_filters::Synchronizer<keyframe_sync_policy>>(
-      keyframe_sync_policy(kMaxKeyframeSynchronizerQueueSize),
-      keyframe_image_subscriber_,
-      keyframe_pose_subscriber_,
-      keyframe_points_subscriber_,
-      svin_health_subscriber_);
-  sync_keyframe_->registerCallback(std::bind(&Subscriber::keyframeCallback,
-                                             this,
-                                             std::placeholders::_1,
-                                             std::placeholders::_2,
-                                             std::placeholders::_3,
-                                             std::placeholders::_4));
+  keyframe_image_subscriber_.subscribe(node_, kf_image_topic_, rmw_qos_profile);
+  if (params_.camera_calibrations_.size() == 2) {
+    keyframe_image_camera1_subscriber_.subscribe(node_, "/keyframe_image_1", rmw_qos_profile);
+    sync_multicamera_keyframe_ =
+        std::make_unique<message_filters::Synchronizer<multicamera_keyframe_sync_policy>>(
+            multicamera_keyframe_sync_policy(kMaxKeyframeSynchronizerQueueSize),
+            keyframe_image_subscriber_,
+            keyframe_image_camera1_subscriber_,
+            keyframe_pose_subscriber_,
+            keyframe_points_subscriber_,
+            svin_health_subscriber_);
+    sync_multicamera_keyframe_->registerCallback(std::bind(&Subscriber::multicameraKeyframeCallback,
+                                                            this,
+                                                            std::placeholders::_1,
+                                                            std::placeholders::_2,
+                                                            std::placeholders::_3,
+                                                            std::placeholders::_4,
+                                                            std::placeholders::_5));
+  } else {
+    sync_keyframe_ = std::make_unique<message_filters::Synchronizer<keyframe_sync_policy>>(
+        keyframe_sync_policy(kMaxKeyframeSynchronizerQueueSize),
+        keyframe_image_subscriber_,
+        keyframe_pose_subscriber_,
+        keyframe_points_subscriber_,
+        svin_health_subscriber_);
+    sync_keyframe_->registerCallback(std::bind(&Subscriber::keyframeCallback,
+                                               this,
+                                               std::placeholders::_1,
+                                               std::placeholders::_2,
+                                               std::placeholders::_3,
+                                               std::placeholders::_4));
+  }
 
   if (params_.global_mapping_params_.enabled) {
-    sub_orig_image_ = node_->create_subscription<sensor_msgs::msg::Image>(
-        raw_image_topic_, 100, std::bind(&Subscriber::imageCallback, this, std::placeholders::_1));
+    sub_orig_images_.reserve(params_.camera_calibrations_.size());
+    for (size_t camera_index = 0; camera_index < params_.camera_calibrations_.size(); ++camera_index) {
+      const std::string topic = "/cam" + std::to_string(camera_index) + "/image_raw";
+      sub_orig_images_.push_back(node_->create_subscription<sensor_msgs::msg::Image>(
+          topic,
+          100,
+          [this, camera_index](const sensor_msgs::msg::Image::ConstSharedPtr msg) {
+            imageCallback(camera_index, msg);
+          }));
+    }
   }
   if (params_.health_params_.enabled) {
     sub_primitive_estimator_ = node_->create_subscription<nav_msgs::msg::Odometry>(
@@ -83,13 +109,13 @@ void Subscriber::primitiveEstimatorCallback(const nav_msgs::msg::Odometry::Const
   }
 }
 
-void Subscriber::imageCallback(const sensor_msgs::msg::Image::ConstSharedPtr image_msg) {
+void Subscriber::imageCallback(size_t camera_index, const sensor_msgs::msg::Image::ConstSharedPtr image_msg) {
   cv::Mat image = UtilsOpenCV::readRosImage(image_msg, false);
   auto image_with_timestamp =
       std::make_unique<std::pair<Timestamp, cv::Mat>>(std::make_pair(Utils::getHeaderStamp(image_msg->header), image));
   // raw image callback is not compulsory
   if (raw_image_callback_) {
-    raw_image_callback_(std::move(image_with_timestamp));
+    raw_image_callback_(camera_index, std::move(image_with_timestamp));
   } else {
     LOG_EVERY_N(WARNING, 100) << "Raw image callback not set";
   }
@@ -132,6 +158,23 @@ void Subscriber::keyframeCallback(const sensor_msgs::msg::Image::ConstSharedPtr 
                                   const nav_msgs::msg::Odometry::ConstSharedPtr kf_odom,
                                   const sensor_msgs::msg::PointCloud::ConstSharedPtr kf_points,
                                   const okvis_ros::msg::SvinHealth::ConstSharedPtr svin_health) {
+  processKeyframe({kf_image_msg}, kf_odom, kf_points, svin_health);
+}
+
+void Subscriber::multicameraKeyframeCallback(
+    const sensor_msgs::msg::Image::ConstSharedPtr kf_image0_msg,
+    const sensor_msgs::msg::Image::ConstSharedPtr kf_image1_msg,
+    const nav_msgs::msg::Odometry::ConstSharedPtr kf_odom,
+    const sensor_msgs::msg::PointCloud::ConstSharedPtr kf_points,
+    const okvis_ros::msg::SvinHealth::ConstSharedPtr svin_health) {
+  processKeyframe({kf_image0_msg, kf_image1_msg}, kf_odom, kf_points, svin_health);
+}
+
+void Subscriber::processKeyframe(
+    const std::vector<sensor_msgs::msg::Image::ConstSharedPtr>& kf_image_msgs,
+    const nav_msgs::msg::Odometry::ConstSharedPtr& kf_odom,
+    const sensor_msgs::msg::PointCloud::ConstSharedPtr& kf_points,
+    const okvis_ros::msg::SvinHealth::ConstSharedPtr& svin_health) {
   if (frozen_) {
     return;  // frozen: ignore keyframes
   }
@@ -157,22 +200,27 @@ void Subscriber::keyframeCallback(const sensor_msgs::msg::Image::ConstSharedPtr 
                                  .toRotationMatrix();
 
   std::vector<cv::Point3f> keyframe_points;
+  std::vector<float> point_qualities;
   std::vector<cv::KeyPoint> keypoint_observations;
   std::vector<Eigen::Vector3i> point_ids;
-  std::vector<int64_t> landmark_ids;
   std::vector<std::vector<int64_t>> kf_covisibilities;
 
   int64_t keyframe_index = -1;
-  cv::Mat kf_image = UtilsOpenCV::readRosImage(kf_image_msg);
+  std::vector<cv::Mat> kf_images;
+  kf_images.reserve(kf_image_msgs.size());
+  for (const auto& image_msg : kf_image_msgs) {
+    kf_images.push_back(UtilsOpenCV::readRosImage(image_msg));
+  }
+  std::vector<size_t> camera_indices;
 
   for (unsigned int i = 0; i < kf_points->points.size(); i++) {
     keyframe_index = kf_points->channels[i].values[4];
 
     cv::Point3f point_3d(kf_points->points[i].x, kf_points->points[i].y, kf_points->points[i].z);
     keyframe_points.push_back(point_3d);
+    point_qualities.push_back(kf_points->channels[i].values[3]);
 
     // @Reloc landmarkId, poseId or MultiFrameId,  keypointIdx
-    int64_t landmark_id = kf_points->channels[i].values[0];
     Eigen::Vector3i point_id(
         kf_points->channels[i].values[0], kf_points->channels[i].values[1], kf_points->channels[i].values[2]);
     point_ids.push_back(point_id);
@@ -188,8 +236,31 @@ void Subscriber::keyframeCallback(const sensor_msgs::msg::Image::ConstSharedPtr 
 
     keypoint_observations.push_back(p_2d_uv);
 
+    const bool has_camera_index = params_.camera_calibrations_.size() > 1 &&
+                                  kf_points->channels[i].values.size() >= 13;
+    const size_t camera_index = has_camera_index
+                                    ? static_cast<size_t>(kf_points->channels[i].values[12])
+                                    : 0u;
+    if (camera_index >= params_.camera_calibrations_.size()) {
+      LOG(WARNING) << "Skipping keyframe observation with invalid camera index " << camera_index;
+      keyframe_points.pop_back();
+      point_qualities.pop_back();
+      point_ids.pop_back();
+      keypoint_observations.pop_back();
+      continue;
+    }
+    if (camera_index >= kf_images.size()) {
+      keyframe_points.pop_back();
+      point_qualities.pop_back();
+      point_ids.pop_back();
+      keypoint_observations.pop_back();
+      continue;
+    }
+    camera_indices.push_back(camera_index);
+
     std::vector<int64_t> covisible_kfs;
-    for (size_t sz = 12; sz < kf_points->channels[i].values.size(); sz++) {
+    const size_t covisibility_begin = has_camera_index ? 13u : 12u;
+    for (size_t sz = covisibility_begin; sz < kf_points->channels[i].values.size(); sz++) {
       int observed_kf_index = kf_points->channels[i].values[sz];
       if (observed_kf_index != keyframe_index) {
         covisible_kfs.push_back(observed_kf_index);
@@ -200,12 +271,14 @@ void Subscriber::keyframeCallback(const sensor_msgs::msg::Image::ConstSharedPtr 
 
   if (keyframe_index != -1) {
     std::unique_ptr<KeyframeInfo> keyframe_info = std::make_unique<KeyframeInfo>(keyframe_index,
-                                                                                 kf_image,
+                                                                                 kf_images,
                                                                                  translation,
                                                                                  rotation,
                                                                                  tracking_info,
                                                                                  keyframe_points,
+                                                                                 point_qualities,
                                                                                  keypoint_observations,
+                                                                                 camera_indices,
                                                                                  point_ids,
                                                                                  kf_covisibilities);
 

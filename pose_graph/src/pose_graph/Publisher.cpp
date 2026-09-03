@@ -21,7 +21,8 @@
 
 #include "utils/Utils.h"
 
-Publisher::Publisher(std::shared_ptr<rclcpp::Node> node, bool debug_mode) : node_(node), debug_mode_(debug_mode) {
+Publisher::Publisher(std::shared_ptr<rclcpp::Node> node, const Parameters& parameters)
+    : node_(node), debug_mode_(parameters.debug_mode_) {
   // Publishers
   // pub_matched_points_ = node_->create_publisher<sensor_msgs::msg::PointCloud>("match_points", 100);
   pub_gloal_map_ = node_->create_publisher<sensor_msgs::msg::PointCloud2>("global_map", 2);
@@ -40,7 +41,18 @@ Publisher::Publisher(std::shared_ptr<rclcpp::Node> node, bool debug_mode) : node
   camera_pose_visualizer_ = std::make_unique<CameraPoseVisualization>(1.0, 0.0, 0.0, 1.0);
   camera_pose_visualizer_->setScale(0.4);
   camera_pose_visualizer_->setLineWidth(0.04);
+  const Eigen::Matrix4d T_SC0 = parameters.camera_calibrations_.front().T_imu_cam0_;
+  T_C0_Ci_.reserve(parameters.camera_calibrations_.size());
+  for (const CameraCalibration& calibration : parameters.camera_calibrations_) {
+    T_C0_Ci_.push_back(cameraPoseFromPrimary(Eigen::Matrix4d::Identity(), T_SC0, calibration.T_imu_cam0_));
+  }
   pub_visualization_ = node_->create_publisher<visualization_msgs::msg::MarkerArray>("visualization", 100);
+}
+
+Eigen::Matrix4d Publisher::cameraPoseFromPrimary(const Eigen::Matrix4d& T_WC0,
+                                                  const Eigen::Matrix4d& T_SC0,
+                                                  const Eigen::Matrix4d& T_SCi) {
+  return T_WC0 * T_SC0.inverse() * T_SCi;
 }
 
 // void Publisher::kfMatchedPointCloudCallback(const sensor_msgs::msg::PointCloud& msg) {
@@ -91,7 +103,19 @@ void Publisher::publishKeyframePath(const std::pair<Timestamp, Eigen::Matrix4d>&
   publishPath(loop_closure_traj_, pub_loop_closure_path_);
 
   camera_pose_visualizer_->clearCameraPoseMarkers();
-  camera_pose_visualizer_->add_pose(trans, quat);
+  for (size_t camera_index = 0; camera_index < T_C0_Ci_.size(); ++camera_index) {
+    const Eigen::Matrix4d T_WCi = kf_pose.second * T_C0_Ci_[camera_index];
+    const Eigen::Vector3d camera_position = T_WCi.block<3, 1>(0, 3);
+    const Eigen::Quaterniond camera_orientation(T_WCi.block<3, 3>(0, 0));
+    if (camera_index == 0) {
+      camera_pose_visualizer_->setImageBoundaryColor(1.0, 0.0, 0.0);
+      camera_pose_visualizer_->setOpticalCenterConnectorColor(1.0, 0.0, 0.0);
+    } else {
+      camera_pose_visualizer_->setImageBoundaryColor(0.0, 0.7, 1.0);
+      camera_pose_visualizer_->setOpticalCenterConnectorColor(0.0, 0.7, 1.0);
+    }
+    camera_pose_visualizer_->add_pose(camera_position, camera_orientation);
+  }
   if (!loop_closure_edge.first.isZero() || !loop_closure_edge.second.isZero()) {
     camera_pose_visualizer_->add_loopedge(loop_closure_edge.first, loop_closure_edge.second);
   }

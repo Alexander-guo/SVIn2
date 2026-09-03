@@ -37,9 +37,10 @@ class Keyframe {
            int _index,
            Eigen::Vector3d& _svin_T_w_i,             // NOLINT
            Eigen::Matrix3d& _svin_R_w_i,             // NOLINT
-           cv::Mat& _image,                          // NOLINT
+           std::vector<cv::Mat>& _images,            // NOLINT
            std::vector<cv::Point3f>& _point_3d,      // NOLINT
            std::vector<cv::KeyPoint>& _point_2d_uv,  // NOLINT
+           std::vector<size_t>& _point_camera_indices,  // NOLINT
            std::map<Keyframe*, int>& KFcounter,      // NOLINT
            int _sequence,
            BriefVocabulary* vocBrief,
@@ -120,10 +121,14 @@ class Keyframe {
   Eigen::Vector3d origin_svin_T;
   Eigen::Matrix3d origin_svin_R;
   cv::Mat image;
+  std::vector<cv::Mat> images;
   std::vector<cv::Point3f> point_3d;
   std::vector<cv::KeyPoint> point_2d_uv;
   std::vector<Eigen::Vector3i> point_ids_;
 
+  std::vector<std::vector<cv::Point3f>> camera_point_3d;
+  std::vector<std::vector<cv::KeyPoint>> camera_point_2d_uv;
+  std::vector<std::vector<Eigen::Vector3i>> camera_point_ids;
   std::vector<cv::KeyPoint> keypoints;
   std::vector<cv::KeyPoint> keypoints_norm;
   std::vector<cv::KeyPoint> window_keypoints_norm;

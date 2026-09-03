@@ -8,6 +8,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #include "common/Definitions.h"
@@ -38,7 +39,8 @@ class LoopClosure {
                             const std::vector<cv::Point3f>& keyframe_points,
                             const std::vector<float>& point_qualities,
                             const std::vector<Eigen::Vector3i>& point_ids,
-                            const std::vector<cv::KeyPoint>& cv_keypoints);
+                            const std::vector<cv::KeyPoint>& cv_keypoints,
+                            std::unordered_set<uint64_t>& mapped_landmark_ids);
 
   // Save mapping: landmark_id -> list of keyframe_ids that observed it (one line per landmark)
   // Returns true on success.
@@ -54,9 +56,12 @@ class LoopClosure {
     }
   }
 
-  inline void fillImageQueue(std::unique_ptr<std::pair<Timestamp, cv::Mat>> original_image_with_timestamp) {
+  inline void fillImageQueue(size_t camera_index,
+                             std::unique_ptr<std::pair<Timestamp, cv::Mat>> original_image_with_timestamp) {
     CHECK(original_image_with_timestamp);
-    raw_image_buffer_.addValue(original_image_with_timestamp->first, original_image_with_timestamp->second);
+    CHECK_LT(camera_index, raw_image_buffers_.size());
+    raw_image_buffers_[camera_index]->addValue(original_image_with_timestamp->first,
+                                               original_image_with_timestamp->second);
   }
 
   inline void fillPrimitiveEstimatorBuffer(std::unique_ptr<std::pair<Timestamp, cv::Mat>> primitive_estimator_pose) {
@@ -109,7 +114,7 @@ class LoopClosure {
   bool healthCheck(const TrackingInfo& tracking_info, std::string error_message);
 
   ThreadsafeQueue<std::unique_ptr<KeyframeInfo>> keyframe_tracking_queue_;
-  utils::ThreadsafeTemporalBuffer<cv::Mat> raw_image_buffer_;
+  std::vector<std::unique_ptr<utils::ThreadsafeTemporalBuffer<cv::Mat>>> raw_image_buffers_;
 
   // TODO(bjoshi): I had issues with using pointers to Eigen::Matrix4d. So using cv::Mat for now
   utils::ThreadsafeTemporalBuffer<cv::Mat> primitive_estimator_poses_buffer_;

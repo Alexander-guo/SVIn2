@@ -131,9 +131,10 @@ Keyframe::Keyframe(Timestamp _time_stamp,
                    int _index,
                    Eigen::Vector3d& _svin_T_w_i,
                    Eigen::Matrix3d& _svin_R_w_i,
-                   cv::Mat& _image,
+                   std::vector<cv::Mat>& _images,
                    std::vector<cv::Point3f>& _point_3d,
                    std::vector<cv::KeyPoint>& _point_2d_uv,
+                   std::vector<size_t>& _point_camera_indices,
                    std::map<Keyframe*, int>& KFcounter,
                    int _sequence,
                    BriefVocabulary* vocBrief,
@@ -143,8 +144,6 @@ Keyframe::Keyframe(Timestamp _time_stamp,
   time_stamp = _time_stamp;
 
   // @Reloc
-  point_ids_ = _point_ids;
-
   index = _index;
   svin_T_w_i = _svin_T_w_i;
   svin_R_w_i = _svin_R_w_i;
@@ -152,9 +151,31 @@ Keyframe::Keyframe(Timestamp _time_stamp,
   R_w_i = svin_R_w_i;
   origin_svin_T = svin_T_w_i;
   origin_svin_R = svin_R_w_i;
-  image = _image.clone();
-  point_3d = _point_3d;
-  point_2d_uv = _point_2d_uv;
+  images.reserve(_images.size());
+  for (const cv::Mat& source_image : _images) images.push_back(source_image.clone());
+  image = images.empty() ? cv::Mat() : images.front();
+
+  const size_t camera_count = images.size();
+  camera_point_3d.resize(camera_count);
+  camera_point_2d_uv.resize(camera_count);
+  camera_point_ids.resize(camera_count);
+  for (size_t i = 0; i < _point_3d.size() && i < _point_2d_uv.size() &&
+                     i < _point_ids.size() && i < _point_camera_indices.size();
+       ++i) {
+    const size_t camera_index = _point_camera_indices[i];
+    if (camera_index >= camera_count) continue;
+    camera_point_3d[camera_index].push_back(_point_3d[i]);
+    camera_point_2d_uv[camera_index].push_back(_point_2d_uv[i]);
+    camera_point_ids[camera_index].push_back(_point_ids[i]);
+  }
+  // Keep the established camera-0 representation untouched for the active
+  // loop-closure path. Other camera views remain available for
+  // multicamera global-map visualization.
+  if (camera_count > 0) {
+    point_3d = camera_point_3d[0];
+    point_2d_uv = camera_point_2d_uv[0];
+    point_ids_ = camera_point_ids[0];
+  }
 
   has_loop = false;
   loop_index = -1;
@@ -171,7 +192,10 @@ Keyframe::Keyframe(Timestamp _time_stamp,
 
   computeBRIEFPoint();
 
-  if (!params.debug_mode_) image.release();
+  if (!params.debug_mode_) {
+    image.release();
+    for (cv::Mat& camera_image : images) camera_image.release();
+  }
 }
 
 Keyframe::Keyframe(int64_t _time_stamp,

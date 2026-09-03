@@ -1480,7 +1480,7 @@ void ThreadedKFVio::optimizationLoop() {
             PointMap lmMap;  // get a copy of landmarksMap_
             estimator_.getLandmarks(lmMap);
 
-            const size_t CamIndexA = 0;  // primary camera used by the pose-graph keyframe data
+            const size_t CamIndexA = 0;  // camera-0 pose remains the pose-graph state convention
             std::vector<cv::Mat> keyframeImages(frame_pairs->numFrames());
             for (size_t cameraIndex = 0; cameraIndex < frame_pairs->numFrames(); ++cameraIndex) {
               keyframeImages[cameraIndex] = frame_pairs->frames_[cameraIndex].image();
@@ -1506,11 +1506,12 @@ void ThreadedKFVio::optimizationLoop() {
 
                   obs_num++;
 
-                  cv::KeyPoint cvkeypoint;  // Associated 2D point in left image to publish
-                  if (mit->first.cameraIndex != CamIndexA) continue;
-                  if ((mit->first).keypointIndex >= frame_pairs->numKeypoints(CamIndexA)) continue;
+                  const size_t observationCameraIndex = mit->first.cameraIndex;
+                  cv::KeyPoint cvkeypoint;  // Associated 2D point in the observing camera image.
+                  if (observationCameraIndex >= frame_pairs->numFrames()) continue;
+                  if ((mit->first).keypointIndex >= frame_pairs->numKeypoints(observationCameraIndex)) continue;
 
-                  frame_pairs->getCvKeypoint(CamIndexA, (mit->first).keypointIndex, cvkeypoint);
+                  frame_pairs->getCvKeypoint(observationCameraIndex, (mit->first).keypointIndex, cvkeypoint);
 
                   std::vector<double> pt_id_w_uv;
                   if (isnan(cvkeypoint.pt.x) || isnan(cvkeypoint.pt.y) ||
@@ -1533,6 +1534,12 @@ void ThreadedKFVio::optimizationLoop() {
                   pt_id_w_uv.push_back(static_cast<double>(cvkeypoint.octave));
                   pt_id_w_uv.push_back(cvkeypoint.response);
                   pt_id_w_uv.push_back(static_cast<double>(cvkeypoint.class_id));
+                  // Multicamera extension.  The first twelve fields retain their
+                  // legacy meaning; field twelve identifies the image containing
+                  // this observation.
+                  if (frame_pairs->numFrames() > 1) {
+                    pt_id_w_uv.push_back(static_cast<double>(observationCameraIndex));
+                  }
 
                   ptList.push_back(pt_id_w_uv);
 

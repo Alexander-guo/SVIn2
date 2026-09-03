@@ -20,10 +20,14 @@ LoopClosure::LoopClosure(Parameters& params)
       pose_graph_(nullptr),
       global_map_(nullptr),
       keyframe_tracking_queue_("keyframe_queue"),
-      raw_image_buffer_(kBufferLengthNs),
       primitive_estimator_poses_buffer_(kBufferLengthNs) {
   frame_index_ = 0;
   last_translation_ = Eigen::Vector3d(-100, -100, -100);
+  raw_image_buffers_.reserve(params_.camera_calibrations_.size());
+  for (size_t camera_index = 0; camera_index < params_.camera_calibrations_.size(); ++camera_index) {
+    raw_image_buffers_.push_back(
+        std::make_unique<utils::ThreadsafeTemporalBuffer<cv::Mat>>(kBufferLengthNs));
+  }
 
   setup();
   shutdown_ = false;
@@ -103,7 +107,7 @@ void LoopClosure::run() {
         uint32_t combined_kf_index = keyframe_info->keyframe_index_ + primitive_keyframes;
         std::map<Keyframe*, int> KFcounter;
         for (size_t i = 0; i < keyframe_info->keyfame_points_.size(); ++i) {
-          double quality = static_cast<double>(keyframe_info->tracking_info_.points_quality_[i]);
+          if (i >= keyframe_info->camera_indices_.size() || keyframe_info->camera_indices_[i] != 0u) continue;
           for (auto observed_kf_index : keyframe_info->point_covisibilities_[i]) {
             observed_kf_index += primitive_keyframes;
             if (kfMapper_.find(observed_kf_index) != kfMapper_.end()) {
@@ -119,9 +123,10 @@ void LoopClosure::run() {
                                           combined_kf_index,
                                           translation,
                                           rotation,
-                                          keyframe_info->keyframe_image_,
+                                          keyframe_info->keyframe_images_,
                                           keyframe_info->keyfame_points_,
                                           keyframe_info->cv_keypoints_,
+                                          keyframe_info->camera_indices_,
                                           KFcounter,
                                           sequence_,
                                           voc_,
@@ -132,29 +137,45 @@ void LoopClosure::run() {
         pose_graph_->addKFToPoseGraph(keyframe, params_.loop_closure_params_.enabled);
 
         if (params_.global_mapping_params_.enabled) {
-          cv::Mat original_color_image;
-          if (!raw_image_buffer_.getNearestValueToTime(stamp, &original_color_image)) {
-            LOG(WARNING) << "Could not find color image for keyframe with timestamp " << stamp;
-          } else {
-            if (params_.resize_factor_ != 0) {
+          std::vector<std::vector<float>> camera_qualities(params_.camera_calibrations_.size());
+          for (size_t i = 0; i < keyframe_info->camera_indices_.size() &&
+                             i < keyframe_info->point_qualities_.size();
+               ++i) {
+            const size_t camera_index = keyframe_info->camera_indices_[i];
+            if (camera_index < camera_qualities.size()) {
+              camera_qualities[camera_index].push_back(keyframe_info->point_qualities_[i]);
+            }
+          }
+
+          std::unordered_set<uint64_t> mapped_landmark_ids;
+          const size_t camera_count = std::min({raw_image_buffers_.size(),
+                                                keyframe->camera_point_3d.size(),
+                                                keyframe->camera_point_2d_uv.size(),
+                                                keyframe->camera_point_ids.size(),
+                                                camera_qualities.size()});
+          for (size_t camera_index = 0; camera_index < camera_count; ++camera_index) {
+            cv::Mat original_color_image;
+            if (!raw_image_buffers_[camera_index]->getNearestValueToTime(stamp, &original_color_image)) {
+              LOG_EVERY_N(WARNING, 100) << "Could not find color image for camera " << camera_index
+                                        << " and keyframe timestamp " << stamp;
+              continue;
+            }
+            const Eigen::Vector2i image_dimension = params_.camera_calibrations_[camera_index].image_dimension_;
+            if (original_color_image.cols != image_dimension.x() || original_color_image.rows != image_dimension.y()) {
               cv::resize(original_color_image,
                          original_color_image,
-                         cv::Size(params_.camera_calibration_.image_dimension_.x(),
-                                  params_.camera_calibration_.image_dimension_.y()),
+                         cv::Size(image_dimension.x(), image_dimension.y()),
                          cv::INTER_LINEAR);
             }
-            if (kfMapper_.find(keyframe_info->keyframe_index_) != kfMapper_.end()) {
-              addPointsToGlobalMap(combined_kf_index,
-                                   original_color_image,
-                                   rotation,
-                                   translation,
-                                   keyframe_info->keyfame_points_,
-                                   keyframe_info->tracking_info_.points_quality_,
-                                   keyframe_info->keypoint_ids_,
-                                   keyframe_info->cv_keypoints_);
-            } else {
-              LOG(WARNING) << "Keyframe not found";
-            }
+            addPointsToGlobalMap(combined_kf_index,
+                                 original_color_image,
+                                 rotation,
+                                 translation,
+                                 keyframe->camera_point_3d[camera_index],
+                                 camera_qualities[camera_index],
+                                 keyframe->camera_point_ids[camera_index],
+                                 keyframe->camera_point_2d_uv[camera_index],
+                                 mapped_landmark_ids);
           }
         }
         // last_keyframe_index_ = keyframe_info->keyframe_index_;
@@ -224,11 +245,18 @@ void LoopClosure::addPointsToGlobalMap(const int64_t keyframe_index,
                                        const std::vector<cv::Point3f>& keyframe_points,
                                        const std::vector<float>& point_qualities,
                                        const std::vector<Eigen::Vector3i>& point_ids,
-                                       const std::vector<cv::KeyPoint>& cv_keypoints) {
-  for (size_t i = 0; i < keyframe_points.size(); ++i) {
+                                       const std::vector<cv::KeyPoint>& cv_keypoints,
+                                       std::unordered_set<uint64_t>& mapped_landmark_ids) {
+  const size_t point_count =
+      std::min({keyframe_points.size(), point_qualities.size(), point_ids.size(), cv_keypoints.size()});
+  for (size_t i = 0; i < point_count; ++i) {
     float quality = point_qualities[i];
     if (quality < params_.global_mapping_params_.min_lmk_quality) continue;
+    const uint64_t landmark_id = static_cast<uint64_t>(point_ids[i].x());
+    if (mapped_landmark_ids.count(landmark_id) != 0u) continue;
     Eigen::Vector3d global_point_position(keyframe_points[i].x, keyframe_points[i].y, keyframe_points[i].z);
+    // Pose-graph vertices use camera 0. Store every camera's landmarks in that
+    // same local frame; only the pixel color is sampled from its observing camera.
     Eigen::Vector3d point_cam_frame = camera_rotation.transpose() * (global_point_position - camera_translation);
 
     Keyframe* kf = kfMapper_.find(keyframe_index)->second;
@@ -238,14 +266,16 @@ void LoopClosure::addPointsToGlobalMap(const int64_t keyframe_index,
     global_point_position = R_w_kf * point_cam_frame + T_w_kf;
 
     cv::KeyPoint image_point = cv_keypoints[i];
+    const int image_x = static_cast<int>(image_point.pt.x);
+    const int image_y = static_cast<int>(image_point.pt.y);
+    if (image_x < 0 || image_y < 0 || image_x >= color_image.cols || image_y >= color_image.rows) continue;
     cv::Vec3b color =
-        color_image.at<cv::Vec3b>(static_cast<uint16_t>(image_point.pt.y), static_cast<uint16_t>(image_point.pt.x));
+        color_image.at<cv::Vec3b>(image_y, image_x);
     // bgr to rgb
     Eigen::Vector3d color_eigen(
         static_cast<double>(color[2]), static_cast<double>(color[1]), static_cast<double>(color[0]));
-    uint64_t landmark_id = static_cast<uint64_t>(point_ids[i].x());
-
     global_map_->addLandmark(global_point_position, landmark_id, quality, keyframe_index, point_cam_frame, color_eigen);
+    mapped_landmark_ids.insert(landmark_id);
   }
 }
 

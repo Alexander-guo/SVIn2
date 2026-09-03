@@ -161,7 +161,7 @@ int main(int argc, char** argv) {
 
   auto subscriber = std::make_unique<Subscriber>(node, params);
   auto loop_closure = std::make_unique<LoopClosure>(params);
-  auto publisher = std::make_unique<Publisher>(node, params.debug_mode_);
+  auto publisher = std::make_unique<Publisher>(node, params);
 
   loop_closure->setKeyframePoseCallback(
       std::bind(&Publisher::publishKeyframePath, publisher.get(), std::placeholders::_1, std::placeholders::_2));
@@ -253,7 +253,10 @@ int main(int argc, char** argv) {
     publisher->setGlobalPointCloudFunction(
         std::bind(&LoopClosure::getGlobalMap, loop_closure.get(), std::placeholders::_1));
     subscriber->registerImageCallback(
-        std::bind(&LoopClosure::fillImageQueue, loop_closure.get(), std::placeholders::_1));
+        std::bind(&LoopClosure::fillImageQueue,
+                  loop_closure.get(),
+                  std::placeholders::_1,
+                  std::placeholders::_2));
     timer = node->create_wall_timer(std::chrono::seconds(5),
                                     std::bind(&Publisher::updatePublishGlobalMap, publisher.get()));
     pointcloud_service = node->create_service<std_srvs::srv::Trigger>("save_pointcloud",

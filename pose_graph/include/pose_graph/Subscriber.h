@@ -37,6 +37,7 @@ class Subscriber {
 
   // Subscriber to the keyframe points, image, pose and svin health.
   message_filters::Subscriber<sensor_msgs::msg::Image> keyframe_image_subscriber_;
+  message_filters::Subscriber<sensor_msgs::msg::Image> keyframe_image_camera1_subscriber_;
   message_filters::Subscriber<nav_msgs::msg::Odometry> keyframe_pose_subscriber_;
   message_filters::Subscriber<sensor_msgs::msg::PointCloud> keyframe_points_subscriber_;
   message_filters::Subscriber<okvis_ros::msg::SvinHealth> svin_health_subscriber_;
@@ -46,24 +47,41 @@ class Subscriber {
                                                     sensor_msgs::msg::PointCloud,
                                                     okvis_ros::msg::SvinHealth>
       keyframe_sync_policy;
+  typedef message_filters::sync_policies::ExactTime<sensor_msgs::msg::Image,
+                                                    sensor_msgs::msg::Image,
+                                                    nav_msgs::msg::Odometry,
+                                                    sensor_msgs::msg::PointCloud,
+                                                    okvis_ros::msg::SvinHealth>
+      multicamera_keyframe_sync_policy;
 
   std::unique_ptr<message_filters::Synchronizer<keyframe_sync_policy>> sync_keyframe_;
+  std::unique_ptr<message_filters::Synchronizer<multicamera_keyframe_sync_policy>> sync_multicamera_keyframe_;
 
   // List of other subscribers.
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr
       sub_svin_relocalization_odom_;  // Subscriber to the relocalization odometry.
-  rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr sub_orig_image_;  // Subscriber to the original image.
+  std::vector<rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr>
+      sub_orig_images_;  // Subscribers to the original camera images.
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr
       sub_primitive_estimator_;  // Subscriber to the primitive estimator odometry.
 
   // Callback functions.
   void svinRelocalizationOdomCallback(const nav_msgs::msg::Odometry::ConstSharedPtr msg);
-  void imageCallback(const sensor_msgs::msg::Image::ConstSharedPtr msg);
+  void imageCallback(size_t camera_index, const sensor_msgs::msg::Image::ConstSharedPtr msg);
   void primitiveEstimatorCallback(const nav_msgs::msg::Odometry::ConstSharedPtr msg);
   void keyframeCallback(const sensor_msgs::msg::Image::ConstSharedPtr kf_image_msg,
                         const nav_msgs::msg::Odometry::ConstSharedPtr kf_odom,
                         const sensor_msgs::msg::PointCloud::ConstSharedPtr kf_points,
                         const okvis_ros::msg::SvinHealth::ConstSharedPtr svin_health);
+  void multicameraKeyframeCallback(const sensor_msgs::msg::Image::ConstSharedPtr kf_image0_msg,
+                                   const sensor_msgs::msg::Image::ConstSharedPtr kf_image1_msg,
+                                   const nav_msgs::msg::Odometry::ConstSharedPtr kf_odom,
+                                   const sensor_msgs::msg::PointCloud::ConstSharedPtr kf_points,
+                                   const okvis_ros::msg::SvinHealth::ConstSharedPtr svin_health);
+  void processKeyframe(const std::vector<sensor_msgs::msg::Image::ConstSharedPtr>& kf_image_msgs,
+                       const nav_msgs::msg::Odometry::ConstSharedPtr& kf_odom,
+                       const sensor_msgs::msg::PointCloud::ConstSharedPtr& kf_points,
+                       const okvis_ros::msg::SvinHealth::ConstSharedPtr& svin_health);
 
   std::queue<nav_msgs::msg::Odometry::ConstSharedPtr> prim_estimator_odom_buffer_;
 
@@ -74,14 +92,13 @@ class Subscriber {
   std::string svin_reloc_odom_topic_;      // The topic name of the relocalization odometry.
   std::string svin_health_topic_;          // The topic name of the health of the SVIn.
   std::string primitive_estimator_topic_;  // The topic name of the primitive estimator odometry.
-  std::string raw_image_topic_;            // The topic name of the original image.
 
   double last_image_time_;                // The time of the last image.
   double last_primitive_estimator_time_;  // The time of the last primitive estimator odometry.
 
   KeyframeCallback keyframe_callback_;          // The callback function for the keyframe.
   CVMatCallback primitive_estimator_callback_;  // The callback function for the pose.
-  CVMatCallback raw_image_callback_;            // The callback function for the original_image.
+  CameraCVMatCallback raw_image_callback_;      // The callback function for an indexed original image.
 
   // Watchdog: freeze node when keyframe input stops
   void watchdogTick();
@@ -95,7 +112,7 @@ class Subscriber {
   inline double getLatestPrimitiveEstimatorTime() const { return last_primitive_estimator_time_; }
   inline bool isFrozen() const { return frozen_; }
   inline void registerKeyframeCallback(const KeyframeCallback& callback) { keyframe_callback_ = callback; }
-  inline void registerImageCallback(const CVMatCallback& callback) { raw_image_callback_ = callback; }
+  inline void registerImageCallback(const CameraCVMatCallback& callback) { raw_image_callback_ = callback; }
   inline void registerPrimitiveEstimatorCallback(const CVMatCallback& callback) {
     primitive_estimator_callback_ = callback;
   }  // NOLINT

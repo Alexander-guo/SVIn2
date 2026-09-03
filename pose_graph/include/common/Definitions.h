@@ -44,21 +44,26 @@ struct KeyframeInfo {
   ~KeyframeInfo() = default;
 
   KeyframeInfo(const int64_t& keyframe_index,
-               const cv::Mat& image,
+               const std::vector<cv::Mat>& images,
                const Eigen::Vector3d& translation,
                const Eigen::Matrix3d& rotation,
                const TrackingInfo& tracking_info,
                const std::vector<cv::Point3f>& keyframe_points,
+               const std::vector<float>& point_qualities,
                const std::vector<cv::KeyPoint>& keypoints,
+               const std::vector<size_t>& camera_indices,
                const std::vector<Eigen::Vector3i>& points_ids,
                const std::vector<std::vector<int64_t>>& points_covisibilities)
       : keyframe_index_(keyframe_index),
-        keyframe_image_(image),
+        keyframe_image_(images.empty() ? cv::Mat() : images.front()),
+        keyframe_images_(images),
         translation_(translation),
         rotation_(rotation),
         tracking_info_(tracking_info),
         keyfame_points_(keyframe_points),
+        point_qualities_(point_qualities),
         cv_keypoints_(keypoints),
+        camera_indices_(camera_indices),
         keypoint_ids_(points_ids),
         point_covisibilities_(points_covisibilities) {
     timestamp_ = tracking_info_.timestamp_;
@@ -87,11 +92,14 @@ struct KeyframeInfo {
   Timestamp timestamp_;
   int64_t keyframe_index_;
   cv::Mat keyframe_image_;
+  std::vector<cv::Mat> keyframe_images_;
   Eigen::Vector3d translation_;
   Eigen::Matrix3d rotation_;
   TrackingInfo tracking_info_;
   std::vector<cv::Point3f> keyfame_points_;
+  std::vector<float> point_qualities_;
   std::vector<cv::KeyPoint> cv_keypoints_;
+  std::vector<size_t> camera_indices_;
   // @Reloc: landmarkId, mfId, keypointIdx related to each point
   std::vector<Eigen::Vector3i> keypoint_ids_;
   std::vector<std::vector<int64_t>> point_covisibilities_;
@@ -102,6 +110,7 @@ enum TrackingStatus { NOT_INITIALIZED = 0, TRACKING_VIO = 1, TRACKING_PRIMITIVE_
 typedef std::function<void(const uint64_t)> EventCallback;
 typedef std::function<void(std::unique_ptr<KeyframeInfo>)> KeyframeCallback;
 typedef std::function<void(std::unique_ptr<std::pair<Timestamp, cv::Mat>>)> CVMatCallback;
+typedef std::function<void(size_t, std::unique_ptr<std::pair<Timestamp, cv::Mat>>)> CameraCVMatCallback;
 typedef std::function<void(const std::pair<Timestamp, Eigen::Matrix4d>&)> PoseCallback;
 typedef std::function<void(const std::vector<std::pair<Timestamp, Eigen::Matrix4d>>&)> PathCallback;
 typedef std::function<void(const std::pair<Timestamp, Eigen::Matrix4d>&,

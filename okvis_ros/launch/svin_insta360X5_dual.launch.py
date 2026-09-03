@@ -83,9 +83,38 @@ def generate_launch_description():
     default_value='false'
   )
 
+  # Global mapping uses the original images to colorize each camera's
+  # landmarks. Dual-camera OKVIS decodes these streams internally, so expose
+  # both on the raw topics expected by the pose graph as well.
+  front_uncompressor_node = Node(
+    package='okvis_ros',
+    executable='uncompress_image',
+    name='front_uncompressor',
+    condition=IfCondition(LaunchConfiguration('use_pose_graph')),
+    output='screen',
+    parameters=[{
+      'compressed_img_topic': '/insta360/front/image_raw/compressed',
+      'ouput_img_topic': '/cam0/image_raw'
+    }]
+  )
+
+  rear_uncompressor_node = Node(
+    package='okvis_ros',
+    executable='uncompress_image',
+    name='rear_uncompressor',
+    condition=IfCondition(LaunchConfiguration('use_pose_graph')),
+    output='screen',
+    parameters=[{
+      'compressed_img_topic': '/insta360/rear/image_raw/compressed',
+      'ouput_img_topic': '/cam1/image_raw'
+    }]
+  )
+
   return LaunchDescription([
     config_arg,
     use_pose_graph_arg,
     paired_compressed_log_counters_arg,
+    front_uncompressor_node,
+    rear_uncompressor_node,
     OpaqueFunction(function=launch_setup)
   ])

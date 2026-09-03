@@ -19,7 +19,11 @@ class Publisher {
  public:
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
-  Publisher(std::shared_ptr<rclcpp::Node> node, bool debug_mode);
+  Publisher(std::shared_ptr<rclcpp::Node> node, const Parameters& parameters);
+
+  static Eigen::Matrix4d cameraPoseFromPrimary(const Eigen::Matrix4d& T_WC0,
+                                                const Eigen::Matrix4d& T_SC0,
+                                                const Eigen::Matrix4d& T_SCi);
 
   ~Publisher() = default;
 
@@ -72,6 +76,7 @@ class Publisher {
   nav_msgs::msg::Path primitive_estimator_traj_;  // Stores the primitive estimator path
 
   std::unique_ptr<CameraPoseVisualization> camera_pose_visualizer_;
+  std::vector<Eigen::Matrix4d, Eigen::aligned_allocator<Eigen::Matrix4d>> T_C0_Ci_;
 
   PointCloudCallback pointcloud_callback_;
 };

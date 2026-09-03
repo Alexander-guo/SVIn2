@@ -183,6 +183,7 @@ void Publisher::publishKeyframeAsCallback(const okvis::Time& t,
   point_cloud.header.stamp = rclcpp::Time(t.sec, t.nsec);
 
   uint32_t new_feature_keypoints = 0;
+  uint32_t primary_camera_keypoints = 0;
   for (std::vector<std::list<std::vector<double>>>::iterator it = keyframePoints.begin(); it != keyframePoints.end();
        it++) {
     std::list<std::vector<double>> ptList = *it;
@@ -203,11 +204,11 @@ void Publisher::publishKeyframeAsCallback(const okvis::Time& t,
     point_cloud.points.push_back(p);
     std::advance(lit, 1);  // advancing by 1 after getting the 3d W-coordinate
 
-    // SVIN health
-    svinInfo.points_3d.push_back(p);
-
     sensor_msgs::msg::ChannelFloat32 p_id_w_uv;
     std::vector<double> cvKeypoint_w_id = *lit;
+    const size_t observation_camera_index =
+        cvKeypoint_w_id.size() > 12 ? static_cast<size_t>(cvKeypoint_w_id.at(12)) : 0u;
+    const bool primary_camera_observation = observation_camera_index == 0u;
 
     // @Reloc
     p_id_w_uv.values.push_back(cvKeypoint_w_id.at(0));  // landmark id
@@ -224,6 +225,9 @@ void Publisher::publishKeyframeAsCallback(const okvis::Time& t,
     p_id_w_uv.values.push_back(cvKeypoint_w_id.at(9));   // keypoint octave
     p_id_w_uv.values.push_back(cvKeypoint_w_id.at(10));  // keypoint response
     p_id_w_uv.values.push_back(cvKeypoint_w_id.at(11));  // keypoint class_id
+    if (cvKeypoint_w_id.size() > 12) {
+      p_id_w_uv.values.push_back(cvKeypoint_w_id.at(12));  // observing camera index
+    }
 
     // SVIN health
     int x_coord = cvKeypoint_w_id.at(5);
@@ -232,13 +236,18 @@ void Publisher::publishKeyframeAsCallback(const okvis::Time& t,
     // q01 = image[int(0):int(0.5*nrows), int(0.5*ncols):int(ncols)]
     // q10 = image[int(0.5*nrows):int(nrows), int(0):int(0.5*ncols)]
     // q11 = image[int(0.5*nrows):int(nrows), int(0.5*ncols):int(ncols)]
-    if ((x_coord >= 0 && x_coord <= 0.5 * ncols) && (y_coord >= 0 && y_coord <= 0.5 * nrows)) {
+    if (primary_camera_observation &&
+        (x_coord >= 0 && x_coord <= 0.5 * ncols) && (y_coord >= 0 && y_coord <= 0.5 * nrows)) {
       q00_counter++;
-    } else if ((x_coord >= 0.5 * ncols && x_coord <= ncols) && (y_coord >= 0 && y_coord <= 0.5 * nrows)) {
+    } else if (primary_camera_observation &&
+               (x_coord >= 0.5 * ncols && x_coord <= ncols) && (y_coord >= 0 && y_coord <= 0.5 * nrows)) {
       q01_counter++;
-    } else if ((x_coord >= 0 && x_coord <= 0.5 * ncols) && (y_coord >= 0.5 * nrows && y_coord <= nrows)) {
+    } else if (primary_camera_observation &&
+               (x_coord >= 0 && x_coord <= 0.5 * ncols) && (y_coord >= 0.5 * nrows && y_coord <= nrows)) {
       q10_counter++;
-    } else if ((x_coord >= 0.5 * ncols && x_coord <= ncols) && (y_coord >= 0.5 * nrows && y_coord <= nrows)) {
+    } else if (primary_camera_observation &&
+               (x_coord >= 0.5 * ncols && x_coord <= ncols) &&
+               (y_coord >= 0.5 * nrows && y_coord <= nrows)) {
       q11_counter++;
     }
 
@@ -257,13 +266,18 @@ void Publisher::publishKeyframeAsCallback(const okvis::Time& t,
       covis++;
     }
 
-    if (covis == 0) {
+    if (primary_camera_observation && covis == 0) {
       new_feature_keypoints++;  // if 3D point is not observed by any other keyframe, it is a new feature
     }
-    // SVIN health
-    svinInfo.covisibilities.push_back(covis);
-    svinInfo.quality.push_back(cvKeypoint_w_id.at(3));
-    svinInfo.response_strengths.push_back(cvKeypoint_w_id.at(10));
+    // Preserve the historical camera-0 health semantics while transporting
+    // all camera observations in the point-cloud message.
+    if (primary_camera_observation) {
+      primary_camera_keypoints++;
+      svinInfo.points_3d.push_back(p);
+      svinInfo.covisibilities.push_back(covis);
+      svinInfo.quality.push_back(cvKeypoint_w_id.at(3));
+      svinInfo.response_strengths.push_back(cvKeypoint_w_id.at(10));
+    }
     // This also works fine as above
     /*for (size_t i = 2; i < ptList.size(); i++){
             std::vector<double> kf_id = *lit;
@@ -282,7 +296,7 @@ void Publisher::publishKeyframeAsCallback(const okvis::Time& t,
   } else {
     svinInfo.is_tracking_ok = true;
   }
-  svinInfo.num_tracked_kps = point_cloud.points.size();
+  svinInfo.num_tracked_kps = primary_camera_keypoints;
   svinInfo.kps_per_quadrant.push_back(q00_counter);
   svinInfo.kps_per_quadrant.push_back(q01_counter);
   svinInfo.kps_per_quadrant.push_back(q10_counter);

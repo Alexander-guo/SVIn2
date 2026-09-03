@@ -36,6 +36,8 @@ class CameraPoseVisualization {
 
   void clearCameraPoseMarkers();
 
+  const std::vector<visualization_msgs::msg::Marker>& cameraPoseMarkers() const { return camera_pose_markers; }
+
  private:
   std::vector<visualization_msgs::msg::Marker> camera_pose_markers;
   std::vector<visualization_msgs::msg::Marker> loop_edge_markers;

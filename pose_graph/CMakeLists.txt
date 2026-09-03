@@ -119,6 +119,10 @@ if(BUILD_TESTING)
   ament_add_gtest(test_loop_closure_parameters test/test_loop_closure_parameters.cpp)
   target_link_libraries(test_loop_closure_parameters ${PROJECT_NAME}_lib)
   ament_target_dependencies(test_loop_closure_parameters ${ament_libraries})
+
+  ament_add_gtest(test_camera_pose_visualization test/test_camera_pose_visualization.cpp)
+  target_link_libraries(test_camera_pose_visualization ${PROJECT_NAME}_lib)
+  ament_target_dependencies(test_camera_pose_visualization ${ament_libraries})
 endif()
 
 ament_export_include_directories(include)
