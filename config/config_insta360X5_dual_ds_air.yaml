@@ -65,8 +65,8 @@ numImuFrames: 3 # number of frames linked by most recent nonlinear IMU error ter
 finiteLandmarkRetention: true # bounded A2 finite-landmark retention; set false for baseline comparisons
 
 threading_options:
-    matcherThreads: 8
-    estimatorThreads: 4
+    matcherThreads:10 
+    estimatorThreads: 8
 
 diagnostics_options:
     drift: false
@@ -100,6 +100,14 @@ ceres_options:
     minIterations: 3   # minimum number of iterations always performed
     maxIterations: 20  # never do more than these, even if not converged
     timeLimit: 0.05   # [s] negative values will set the an unlimited time limit
+    spatialBalancing:
+        enable: false
+        rows: 4
+        cols: 4
+        candidateMultiplier: 3
+        minimumPerValidCell: 12 # minimumPerValidCell * rows * cols < maxNoKeypoints, 
+                                #too high may harm stability due to admission of too many weak keypoints in dark areas.
+        localPaddingPixels: 32
 
 # detection
 detection_options:
@@ -112,7 +120,7 @@ detection_options:
 imageDelay: 0.011351271099877698  # in case you are using a custom setup, you will have to calibrate this. 0 for the VISensor. t_cam - imageDelay = t_imu
 
 # display debug images?
-displayImages: true  # displays debug video and keyframe matches. May be slow.
+displayImages: false  # displays debug video and keyframe matches. May be slow.
 
 # use direct driver
 useDriver: false
@@ -150,13 +158,13 @@ claheTilesGridSize: 8
 loop_closure_params:
     enable: 1  
     min_correspondences: 20 #Minimum 2D to 3D correspondences required for loop closure
-    #decrease for more loop closure, might result in false loop closure (20 to 40)
-    pnp_reprojection_threshold: 20.0 #Reprojection threshold for PnP RANSAC
-    #increase for more loop closure, might result in false loop closure (8 to 30)
+                            #decrease for more loop closure, might result in false loop closure (20 to 40)
+    pnp_reprojection_threshold: 15.0 #Reprojection threshold for PnP RANSAC
+                                     #increase for more loop closure, might result in false loop closure (8 to 30)
     pnp_ransac_iterations: 100  #Number of iterations for PnP RANSAC
-    keyframe_queue: 10 #Use 1 for real-time on robot. Something around 5-10 could be ideal. -1 not to skip keyframes at all.
-    max_yaw_diff: 30.0 #Max yaw difference between keyframe and query frame (degrees)
-    max_position_diff: 6.0 #Max position difference between keyframe and query frame (meters)
+    keyframe_queue: 10 # default 5. Use 1 for real-time on robot. Something around 5-10 could be ideal. -1 not to skip keyframes at all.
+    max_yaw_diff: 180.0 # default 25. Max yaw difference between keyframe and query frame (degrees)
+    max_position_diff: 15.0 # default 15. Max position difference between keyframe and query frame (meters)
     multicamera_enable: 1 # active all-pairs retrieval and verification for one rig keyframe
     multicamera_matching_threads: 4 # parallel verification; DBoW query/add remains serialized
     multicamera_diagnostics: 1 # per-camera-pair retrieval and verification CSV
@@ -173,7 +181,7 @@ global_map_params:
     min_landmark_quality: 0.01
 
 output_params:
-    debug: 1
+    debug: 1    # save debug images and CSVs for loop-closure funnel analysis
     lc_diagnostic: 1 # Save loop-closure funnel CSVs only when debug is also enabled
     output_dir: ../pose_graph 
     # does not detect ~, so full path is needed if the path is not detected, /tmp is used a default
