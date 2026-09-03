@@ -80,8 +80,8 @@ class CameraBase {
   /// \name Methods related to masking a certain image area as invalid.
   /// @{
 
-  /// \brief Set the mask. It must be the same size as the image and
-  /// comply with OpenCV: 0 == masked, nonzero == valid.
+  /// \brief Set the mask. It must be the same size as the image. A
+  /// nonzero pixel marks a masked/invalid image location; zero is valid.
   /// Type must be CV_8U1C.
   /// @param[in] mask The actual mask.
   /// @return True if the requirements were followed.

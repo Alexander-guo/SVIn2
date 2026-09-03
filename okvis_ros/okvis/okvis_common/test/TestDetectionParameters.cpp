@@ -98,6 +98,107 @@ TEST(DetectionParameters, ReadsExplicitBriskAbsoluteThreshold) {
   EXPECT_DOUBLE_EQ(parameters.optimization.detectionAbsoluteThreshold, 750.5);
 }
 
+TEST(DetectionParameters, ReadsNormalizedCameraMaskRectangle) {
+  std::ifstream input(OKVIS_TEST_X5_CONFIG);
+  ASSERT_TRUE(input.good());
+
+  TemporaryConfig temporary;
+  std::ofstream output(temporary.path());
+  ASSERT_TRUE(output.good());
+  std::string line;
+  bool inserted = false;
+  while (std::getline(input, line)) {
+    output << line << '\n';
+    if (!inserted && line.find("image_dimension:") != std::string::npos) {
+      output << "        mask: [[0.1, 0.2], [0.6, 0.7]],\n";
+      inserted = true;
+    }
+  }
+  output.close();
+  ASSERT_TRUE(inserted);
+
+  const okvis::VioParameters parameters = readParameters(temporary.path());
+  ASSERT_EQ(parameters.nCameraSystem.numCameras(), 1u);
+  const auto camera = parameters.nCameraSystem.cameraGeometry(0);
+  ASSERT_TRUE(camera->hasMask());
+  ASSERT_EQ(camera->mask().size(), cv::Size(832, 832));
+  EXPECT_EQ(camera->mask().at<unsigned char>(165, 82), 0);
+  EXPECT_EQ(camera->mask().at<unsigned char>(166, 83), 255);
+  EXPECT_EQ(camera->mask().at<unsigned char>(582, 499), 255);
+  EXPECT_EQ(camera->mask().at<unsigned char>(582, 500), 0);
+}
+
+TEST(DetectionParameters, CameraMaskDefaultsToDisabledWhenOmitted) {
+  std::ifstream input(OKVIS_TEST_X5_CONFIG);
+  ASSERT_TRUE(input.good());
+  TemporaryConfig temporary;
+  std::ofstream output(temporary.path());
+  ASSERT_TRUE(output.good());
+  std::string line;
+  while (std::getline(input, line)) {
+    if (line.find("        mask:") == 0) continue;
+    output << line << '\n';
+  }
+  output.close();
+
+  const okvis::VioParameters parameters = readParameters(temporary.path());
+  ASSERT_EQ(parameters.nCameraSystem.numCameras(), 1u);
+  EXPECT_FALSE(parameters.nCameraSystem.cameraGeometry(0)->hasMask());
+}
+
+TEST(DetectionParameters, CameraMaskRectanglesAreIndependentPerCamera) {
+  std::ifstream input(OKVIS_TEST_X5_DUAL_CONFIG);
+  ASSERT_TRUE(input.good());
+  TemporaryConfig temporary;
+  std::ofstream output(temporary.path());
+  ASSERT_TRUE(output.good());
+  std::string line;
+  size_t camera = 0;
+  while (std::getline(input, line)) {
+    output << line << '\n';
+    if (line.find("image_dimension:") == std::string::npos) continue;
+    if (camera == 0) {
+      output << "        mask: [[0.1, 0.2], [0.3, 0.4]],\n";
+    } else if (camera == 1) {
+      output << "        mask: [[0.6, 0.7], [0.8, 0.9]],\n";
+    }
+    ++camera;
+  }
+  output.close();
+  ASSERT_EQ(camera, 2u);
+
+  const okvis::VioParameters parameters = readParameters(temporary.path());
+  ASSERT_EQ(parameters.nCameraSystem.numCameras(), 2u);
+  const auto camera0 = parameters.nCameraSystem.cameraGeometry(0);
+  const auto camera1 = parameters.nCameraSystem.cameraGeometry(1);
+  ASSERT_TRUE(camera0->hasMask());
+  ASSERT_TRUE(camera1->hasMask());
+  EXPECT_EQ(camera0->mask().at<unsigned char>(200, 100), 255);
+  EXPECT_EQ(camera1->mask().at<unsigned char>(200, 100), 0);
+  EXPECT_EQ(camera0->mask().at<unsigned char>(700, 600), 0);
+  EXPECT_EQ(camera1->mask().at<unsigned char>(700, 600), 255);
+}
+
+TEST(DetectionParameters, RejectsInvalidNormalizedCameraMaskRectangle) {
+  std::ifstream input(OKVIS_TEST_X5_CONFIG);
+  ASSERT_TRUE(input.good());
+  TemporaryConfig temporary;
+  std::ofstream output(temporary.path());
+  ASSERT_TRUE(output.good());
+  std::string line;
+  bool inserted = false;
+  while (std::getline(input, line)) {
+    output << line << '\n';
+    if (!inserted && line.find("image_dimension:") != std::string::npos) {
+      output << "        mask: [[0.7, 0.2], [0.6, 1.1]],\n";
+      inserted = true;
+    }
+  }
+  output.close();
+  ASSERT_TRUE(inserted);
+  EXPECT_THROW(readParameters(temporary.path()), okvis::VioParametersReader::Exception);
+}
+
 TEST(DetectionParameters, UsesHistoricalDefaultWhenAbsoluteThresholdIsOmitted) {
   std::ifstream input(OKVIS_TEST_X5_CONFIG);
   ASSERT_TRUE(input.good());

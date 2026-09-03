@@ -188,3 +188,20 @@ TEST(CameraValidDomain, RedOverlayChangesOnlyInvalidPixelsAtHalfOpacity) {
   EXPECT_EQ(image.at<cv::Vec3b>(1, 0), original.at<cv::Vec3b>(1, 0));
   EXPECT_EQ(image.at<cv::Vec3b>(1, 1), original.at<cv::Vec3b>(1, 1));
 }
+
+TEST(CameraValidDomain, ConfiguredMaskOverlayIsBlueAtThirtyPercentOpacity) {
+  cv::Mat image(2, 2, CV_8UC3, cv::Scalar(10, 20, 30));
+  const cv::Mat original = image.clone();
+  cv::Mat validMask(2, 2, CV_8UC1, cv::Scalar(255));
+  validMask.at<unsigned char>(1, 0) = 0;
+
+  cv::Mat blueImage(image.size(), image.type(), cv::Scalar(255, 0, 0));
+  cv::Mat expectedBlend;
+  cv::addWeighted(original, 0.7, blueImage, 0.3, 0.0, expectedBlend);
+  okvis::cameras::overlayConfiguredCameraMask30PercentBlue(&image, validMask);
+
+  EXPECT_EQ(image.at<cv::Vec3b>(1, 0), expectedBlend.at<cv::Vec3b>(1, 0));
+  EXPECT_EQ(image.at<cv::Vec3b>(0, 0), original.at<cv::Vec3b>(0, 0));
+  EXPECT_EQ(image.at<cv::Vec3b>(0, 1), original.at<cv::Vec3b>(0, 1));
+  EXPECT_EQ(image.at<cv::Vec3b>(1, 1), original.at<cv::Vec3b>(1, 1));
+}

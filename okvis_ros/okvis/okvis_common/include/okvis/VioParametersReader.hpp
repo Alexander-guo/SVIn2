@@ -109,6 +109,8 @@ class VioParametersReader {
     std::string distortionType;              ///< Distortion type. ('radialtangential' 'plumb_bob' 'equdistant')
     std::string projectionType;              ///< Projection type. ('pinhole' 'double_sphere')
     Eigen::Vector2d doubleSphereParams;  ///< Double sphere parameters (xi, alpha) for double sphere projection model.
+    bool hasMaskRectangle = false;       ///< Whether a normalized rectangular exclusion mask was configured.
+    Eigen::Vector4d maskRectangle = Eigen::Vector4d::Zero();  ///< [left, top, right, bottom] in [0, 1].
   };
 
   /// If readConfigFile() has been called at least once this is true

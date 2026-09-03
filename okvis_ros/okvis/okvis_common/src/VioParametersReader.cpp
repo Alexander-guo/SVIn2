@@ -52,6 +52,7 @@
 #include <okvis/cameras/RadialTangentialDistortion8.hpp>
 #include <okvis/cameras/NoDistortion.hpp>
 #include <opencv2/core/core.hpp>
+#include <opencv2/imgproc.hpp>
 #include <string>
 #include <vector>
 
@@ -523,16 +524,29 @@ void VioParametersReader::readConfigFile(const std::string& filename) {
   std::vector<CameraCalibration, Eigen::aligned_allocator<CameraCalibration>> calibrations;
   if (!getCameraCalibration(calibrations, file)) LOG(FATAL) << "Did not find any calibration!";
 
+  std::vector<std::shared_ptr<okvis::cameras::CameraBase>> cameraGeometries(calibrations.size());
   size_t camIdx = 0;
   for (size_t i = 0; i < calibrations.size(); ++i) {
     std::shared_ptr<const okvis::kinematics::Transformation> T_SC_okvis_ptr(
         new okvis::kinematics::Transformation(calibrations[i].T_SC.r(), calibrations[i].T_SC.q().normalized()));
+
+    const auto addConfiguredCamera = [&](
+        const std::shared_ptr<okvis::cameras::CameraBase>& camera,
+        okvis::cameras::NCameraSystem::DistortionType distortionType,
+        const char* description) {
+      // Overlap construction assumes unmasked camera models. Install all
+      // feature-exclusion masks after the complete rig overlap has been built.
+      vioParameters_.nCameraSystem.addCamera(T_SC_okvis_ptr, camera, distortionType, false);
+      cameraGeometries[i] = camera;
+      std::stringstream stream;
+      stream << calibrations[i].T_SC.T();
+      LOG(INFO) << description << " " << camIdx << " with T_SC=\n" << stream.str();
+    };
     
     if (strcmp(calibrations[i].projectionType.c_str(), "pinhole") == 0) {
       if (strcmp(calibrations[i].distortionType.c_str(), "equidistant") == 0) {
-        vioParameters_.nCameraSystem.addCamera(
-            T_SC_okvis_ptr,
-            std::shared_ptr<const okvis::cameras::CameraBase>(
+        addConfiguredCamera(
+            std::shared_ptr<okvis::cameras::CameraBase>(
                 new okvis::cameras::PinholeCamera<okvis::cameras::EquidistantDistortion>(
                     calibrations[i].imageDimension[0],
                     calibrations[i].imageDimension[1],
@@ -544,15 +558,12 @@ void VioParametersReader::readConfigFile(const std::string& filename) {
                                                           calibrations[i].distortionCoefficients[1],
                                                           calibrations[i].distortionCoefficients[2],
                                                           calibrations[i].distortionCoefficients[3]) /*, id ?*/)),
-            okvis::cameras::NCameraSystem::Equidistant /*, computeOverlaps ?*/);
-        std::stringstream s;
-        s << calibrations[i].T_SC.T();
-        LOG(INFO) << "Equidistant pinhole camera " << camIdx << " with T_SC=\n" << s.str();
+            okvis::cameras::NCameraSystem::Equidistant,
+            "Equidistant pinhole camera");
       } else if (strcmp(calibrations[i].distortionType.c_str(), "radialtangential") == 0 ||
                 strcmp(calibrations[i].distortionType.c_str(), "plumb_bob") == 0) {
-        vioParameters_.nCameraSystem.addCamera(
-            T_SC_okvis_ptr,
-            std::shared_ptr<const okvis::cameras::CameraBase>(
+        addConfiguredCamera(
+            std::shared_ptr<okvis::cameras::CameraBase>(
                 new okvis::cameras::PinholeCamera<okvis::cameras::RadialTangentialDistortion>(
                     calibrations[i].imageDimension[0],
                     calibrations[i].imageDimension[1],
@@ -564,15 +575,12 @@ void VioParametersReader::readConfigFile(const std::string& filename) {
                                                               calibrations[i].distortionCoefficients[1],
                                                               calibrations[i].distortionCoefficients[2],
                                                               calibrations[i].distortionCoefficients[3]) /*, id ?*/)),
-            okvis::cameras::NCameraSystem::RadialTangential /*, computeOverlaps ?*/);
-        std::stringstream s;
-        s << calibrations[i].T_SC.T();
-        LOG(INFO) << "Radial tangential pinhole camera " << camIdx << " with T_SC=\n" << s.str();
+            okvis::cameras::NCameraSystem::RadialTangential,
+            "Radial tangential pinhole camera");
       } else if (strcmp(calibrations[i].distortionType.c_str(), "radialtangential8") == 0 ||
                 strcmp(calibrations[i].distortionType.c_str(), "plumb_bob8") == 0) {
-        vioParameters_.nCameraSystem.addCamera(
-            T_SC_okvis_ptr,
-            std::shared_ptr<const okvis::cameras::CameraBase>(
+        addConfiguredCamera(
+            std::shared_ptr<okvis::cameras::CameraBase>(
                 new okvis::cameras::PinholeCamera<okvis::cameras::RadialTangentialDistortion8>(
                     calibrations[i].imageDimension[0],
                     calibrations[i].imageDimension[1],
@@ -588,17 +596,16 @@ void VioParametersReader::readConfigFile(const std::string& filename) {
                                                                 calibrations[i].distortionCoefficients[5],
                                                                 calibrations[i].distortionCoefficients[6],
                                                                 calibrations[i].distortionCoefficients[7]) /*, id ?*/)),
-            okvis::cameras::NCameraSystem::RadialTangential8 /*, computeOverlaps ?*/);
-        std::stringstream s;
-        s << calibrations[i].T_SC.T();
-        LOG(INFO) << "Radial tangential 8 pinhole camera " << camIdx << " with T_SC=\n" << s.str();
+            okvis::cameras::NCameraSystem::RadialTangential8,
+            "Radial tangential 8 pinhole camera");
       } else {
-        LOG(ERROR) << "unrecognized distortion type " << calibrations[i].distortionType;
+        OKVIS_ASSERT_TRUE(Exception, false,
+                          "Unrecognized distortion type " << calibrations[i].distortionType
+                                                          << " for camera " << camIdx << ".");
       }
     } else if (strcmp(calibrations[i].projectionType.c_str(), "double_sphere") == 0) {
-      vioParameters_.nCameraSystem.addCamera(
-          T_SC_okvis_ptr,
-          std::shared_ptr<const okvis::cameras::CameraBase>(
+      addConfiguredCamera(
+          std::shared_ptr<okvis::cameras::CameraBase>(
               new okvis::cameras::DoubleSphereCamera<okvis::cameras::NoDistortion>(
                   calibrations[i].imageDimension[0],
                   calibrations[i].imageDimension[1],
@@ -610,14 +617,36 @@ void VioParametersReader::readConfigFile(const std::string& filename) {
                   calibrations[i].doubleSphereParams[1],
                   okvis::cameras::NoDistortion()
                  /*, id ?*/)),
-          okvis::cameras::NCameraSystem::NoDistortion /*, computeOverlaps ?*/);
-      std::stringstream s;
-      s << calibrations[i].T_SC.T();
-      LOG(INFO) << "Double sphere camera " << camIdx << " with T_SC=\n" << s.str();
+          okvis::cameras::NCameraSystem::NoDistortion,
+          "Double sphere camera");
     } else {
-      LOG(ERROR) << "unrecognized projection type " << calibrations[i].projectionType;
+      OKVIS_ASSERT_TRUE(Exception, false,
+                        "Unrecognized projection type " << calibrations[i].projectionType
+                                                        << " for camera " << camIdx << ".");
     }
     ++camIdx;
+  }
+
+  vioParameters_.nCameraSystem.computeOverlaps();
+  for (size_t i = 0; i < calibrations.size(); ++i) {
+    if (!calibrations[i].hasMaskRectangle) continue;
+    const int width = static_cast<int>(calibrations[i].imageDimension[0]);
+    const int height = static_cast<int>(calibrations[i].imageDimension[1]);
+    const Eigen::Vector4d& normalized = calibrations[i].maskRectangle;
+    const int left = cvFloor(normalized[0] * width);
+    const int top = cvFloor(normalized[1] * height);
+    const int right = cvCeil(normalized[2] * width);
+    const int bottom = cvCeil(normalized[3] * height);
+    cv::Mat mask = cv::Mat::zeros(height, width, CV_8UC1);
+    cv::rectangle(mask,
+                  cv::Rect(left, top, right - left, bottom - top),
+                  cv::Scalar(255),
+                  cv::FILLED);
+    OKVIS_ASSERT_TRUE(Exception, cameraGeometries[i]->setMask(mask),
+                      "Could not initialize camera " << i << " exclusion mask.");
+    LOG(INFO) << "Camera " << i << " exclusion mask normalized ["
+              << normalized.transpose() << "] -> pixels [" << left << ", " << top
+              << "] to [" << right << ", " << bottom << ")";
   }
 
   vioParameters_.sensors_information.imuIdx = 0;
@@ -811,6 +840,38 @@ bool VioParametersReader::getCalibrationViaConfig(
       calib.principalPoint(1) = calib.principalPoint(1) * vioParameters_.miscParams.resizeFactor;
 
       LOG(INFO) << "principal_point: " << calib.principalPoint;
+
+      const cv::FileNode maskNode = (*it)["mask"];
+      if (!maskNode.empty()) {
+        OKVIS_ASSERT_TRUE(Exception,
+                          maskNode.isSeq() && maskNode.size() == 2 &&
+                              maskNode[0].isSeq() && maskNode[0].size() == 2 &&
+                              maskNode[1].isSeq() && maskNode[1].size() == 2,
+                          "Camera " << calibrations.size()
+                                    << " 'mask' must be [[left, top], [right, bottom]].");
+        const auto numeric = [](const cv::FileNode& node) {
+          return node.isReal() || node.isInt();
+        };
+        OKVIS_ASSERT_TRUE(Exception,
+                          numeric(maskNode[0][0]) && numeric(maskNode[0][1]) &&
+                              numeric(maskNode[1][0]) && numeric(maskNode[1][1]),
+                          "Camera " << calibrations.size() << " mask coordinates must be numeric.");
+        calib.maskRectangle << static_cast<double>(maskNode[0][0]),
+            static_cast<double>(maskNode[0][1]),
+            static_cast<double>(maskNode[1][0]),
+            static_cast<double>(maskNode[1][1]);
+        OKVIS_ASSERT_TRUE(Exception,
+                          calib.maskRectangle.allFinite() &&
+                              (calib.maskRectangle.array() >= 0.0).all() &&
+                              (calib.maskRectangle.array() <= 1.0).all(),
+                          "Camera " << calibrations.size() << " mask coordinates must be in [0, 1].");
+        OKVIS_ASSERT_TRUE(Exception,
+                          calib.maskRectangle[0] < calib.maskRectangle[2] &&
+                              calib.maskRectangle[1] < calib.maskRectangle[3],
+                          "Camera " << calibrations.size()
+                                    << " mask top-left must be above and left of bottom-right.");
+        calib.hasMaskRectangle = true;
+      }
 
       calibrations.push_back(calib);
     }
