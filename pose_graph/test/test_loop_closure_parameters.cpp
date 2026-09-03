@@ -10,6 +10,9 @@ TEST(LoopClosureParameters, PreserveLegacyDefaults) {
   EXPECT_EQ(params.loop_closure_params_.keyframe_queue_size, 5);
   EXPECT_DOUBLE_EQ(params.loop_closure_params_.max_yaw_diff, 25.0);
   EXPECT_DOUBLE_EQ(params.loop_closure_params_.max_position_diff, 15.0);
+  EXPECT_FALSE(params.loop_closure_params_.multicamera_enabled);
+  EXPECT_FALSE(params.loop_closure_params_.multicamera_diagnostics);
+  EXPECT_EQ(params.loop_closure_params_.multicamera_matching_threads, 1);
   EXPECT_FALSE(params.lc_diagnostic_);
   EXPECT_FALSE(params.loopClosureDiagnosticsEnabled());
 }
@@ -24,6 +27,9 @@ TEST(LoopClosureParameters, LoadQueueAndPoseGatesFromConfig) {
   EXPECT_EQ(params.loop_closure_params_.keyframe_queue_size, -1);
   EXPECT_DOUBLE_EQ(params.loop_closure_params_.max_yaw_diff, 30.0);
   EXPECT_DOUBLE_EQ(params.loop_closure_params_.max_position_diff, 6.0);
+  EXPECT_TRUE(params.loop_closure_params_.multicamera_enabled);
+  EXPECT_TRUE(params.loop_closure_params_.multicamera_diagnostics);
+  EXPECT_EQ(params.loop_closure_params_.multicamera_matching_threads, 4);
   EXPECT_TRUE(params.debug_mode_);
   EXPECT_TRUE(params.lc_diagnostic_);
   EXPECT_TRUE(params.loopClosureDiagnosticsEnabled());

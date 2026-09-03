@@ -44,7 +44,10 @@ def launch_setup(context, *args, **kwargs):
     name='pose_graph_node',
     condition=IfCondition(LaunchConfiguration('use_pose_graph')),
     parameters=[{
-      'config_file': abs_okvis_config_path
+      'config_file': abs_okvis_config_path,
+      'output_directory': LaunchConfiguration('pose_graph_output_directory'),
+      'multicamera_loop_closure_diagnostics': LaunchConfiguration(
+        'multicamera_loop_closure_diagnostics')
     }]
   )
 
@@ -53,6 +56,7 @@ def launch_setup(context, *args, **kwargs):
     package='rviz2',
     executable='rviz2',
     name='rviz',
+    condition=IfCondition(LaunchConfiguration('use_rviz')),
     arguments=['-d', os.path.join(
       FindPackageShare('okvis_ros').perform(context),
       'rviz_config/svin_multicam.rviz')],
@@ -78,9 +82,24 @@ def generate_launch_description():
     default_value='true'
   )
 
+  use_rviz_arg = DeclareLaunchArgument(
+    'use_rviz',
+    default_value='true'
+  )
+
   paired_compressed_log_counters_arg = DeclareLaunchArgument(
     'paired_compressed_log_counters',
     default_value='false'
+  )
+
+  multicamera_loop_closure_diagnostics_arg = DeclareLaunchArgument(
+    'multicamera_loop_closure_diagnostics',
+    default_value='false'
+  )
+
+  pose_graph_output_directory_arg = DeclareLaunchArgument(
+    'pose_graph_output_directory',
+    default_value=''
   )
 
   # Global mapping uses the original images to colorize each camera's
@@ -113,7 +132,10 @@ def generate_launch_description():
   return LaunchDescription([
     config_arg,
     use_pose_graph_arg,
+    use_rviz_arg,
     paired_compressed_log_counters_arg,
+    multicamera_loop_closure_diagnostics_arg,
+    pose_graph_output_directory_arg,
     front_uncompressor_node,
     rear_uncompressor_node,
     OpaqueFunction(function=launch_setup)

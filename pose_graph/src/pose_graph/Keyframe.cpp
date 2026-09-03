@@ -159,6 +159,10 @@ Keyframe::Keyframe(Timestamp _time_stamp,
   camera_point_3d.resize(camera_count);
   camera_point_2d_uv.resize(camera_count);
   camera_point_ids.resize(camera_count);
+  camera_window_brief_descriptors.resize(camera_count);
+  camera_keypoints.resize(camera_count);
+  camera_brief_descriptors.resize(camera_count);
+  camera_bow_vectors.resize(camera_count);
   for (size_t i = 0; i < _point_3d.size() && i < _point_2d_uv.size() &&
                      i < _point_ids.size() && i < _point_camera_indices.size();
        ++i) {
@@ -168,9 +172,8 @@ Keyframe::Keyframe(Timestamp _time_stamp,
     camera_point_2d_uv[camera_index].push_back(_point_2d_uv[i]);
     camera_point_ids[camera_index].push_back(_point_ids[i]);
   }
-  // Keep the established camera-0 representation untouched for the active
-  // loop-closure path. Other camera views remain available for
-  // multicamera global-map visualization.
+  // Preserve the legacy aliases for camera-0 loop closure. Multicamera loop
+  // closure and global-map visualization use the camera-indexed containers.
   if (camera_count > 0) {
     point_3d = camera_point_3d[0];
     point_2d_uv = camera_point_2d_uv[0];
@@ -288,15 +291,26 @@ void Keyframe::updateConnections() {
 void Keyframe::computeWindowBRIEFPoint() {
   BriefExtractor extractor(params_.brief_pattern_file_.c_str());
 
-  window_keypoints = point_2d_uv;
+  const size_t camera_count = params_.loop_closure_params_.multicamera_enabled ||
+                                      (params_.loopClosureDiagnosticsEnabled() &&
+                                       params_.loop_closure_params_.multicamera_diagnostics)
+                              ? images.size()
+                              : std::min<size_t>(1u, images.size());
+  for (size_t camera_index = 0; camera_index < camera_count; ++camera_index) {
+    if (images[camera_index].empty()) continue;
+    extractor(images[camera_index],
+              camera_point_2d_uv[camera_index],
+              camera_window_brief_descriptors[camera_index]);
+  }
 
-  extractor(image, window_keypoints, window_brief_descriptors);
+  window_keypoints = camera_point_2d_uv.empty() ? std::vector<cv::KeyPoint>() : camera_point_2d_uv[0];
+  window_brief_descriptors = camera_window_brief_descriptors.empty()
+                                 ? std::vector<DVision::BRIEF256::bitset>()
+                                 : camera_window_brief_descriptors[0];
 
-  for (int i = 0; i < static_cast<int>(window_keypoints.size()); i++) {
+  for (const cv::KeyPoint& keypoint : window_keypoints) {
     Eigen::Vector3d tmp_p;
-
-    project_normal(Eigen::Vector2d(window_keypoints[i].pt.x, window_keypoints[i].pt.y), tmp_p);
-
+    project_normal(Eigen::Vector2d(keypoint.pt.x, keypoint.pt.y), tmp_p);
     cv::KeyPoint tmp_norm;
     tmp_norm.pt = cv::Point2f(tmp_p.x() / tmp_p.z(), tmp_p.y() / tmp_p.z());
     window_keypoints_norm.push_back(tmp_norm);
@@ -317,27 +331,31 @@ void Keyframe::project_normal(Eigen::Vector2d kp, Eigen::Vector3d& point3d) cons
 void Keyframe::computeBRIEFPoint() {
   BriefExtractor extractor(params_.brief_pattern_file_.c_str());
   const int fast_th = 20;  // corner detector response threshold
-  if (1) {
-    cv::FAST(image, keypoints, fast_th, true);
-  } else {
-    std::vector<cv::Point2f> tmp_pts;
-    cv::goodFeaturesToTrack(image, tmp_pts, 500, 0.01, 10);
-    for (int i = 0; i < static_cast<int>(tmp_pts.size()); i++) {
-      cv::KeyPoint key;
-      key.pt = tmp_pts[i];
-      keypoints.push_back(key);
+  const size_t camera_count = params_.loop_closure_params_.multicamera_enabled ||
+                                      (params_.loopClosureDiagnosticsEnabled() &&
+                                       params_.loop_closure_params_.multicamera_diagnostics)
+                              ? images.size()
+                              : std::min<size_t>(1u, images.size());
+  for (size_t camera_index = 0; camera_index < camera_count; ++camera_index) {
+    if (images[camera_index].empty()) continue;
+    cv::FAST(images[camera_index], camera_keypoints[camera_index], fast_th, true);
+    extractor(images[camera_index], camera_keypoints[camera_index], camera_brief_descriptors[camera_index]);
+
+    if (voc != nullptr && !camera_brief_descriptors[camera_index].empty()) {
+      voc->transform(camera_brief_descriptors[camera_index], camera_bow_vectors[camera_index]);
     }
   }
-  extractor(image, keypoints, brief_descriptors);
 
-  for (int i = 0; i < static_cast<int>(keypoints.size()); i++) {
-    Eigen::Vector3d tmp_p;
-
-    project_normal(Eigen::Vector2d(keypoints[i].pt.x, keypoints[i].pt.y), tmp_p);
-
-    cv::KeyPoint tmp_norm;
-    tmp_norm.pt = cv::Point2f(tmp_p.x() / tmp_p.z(), tmp_p.y() / tmp_p.z());
-    keypoints_norm.push_back(tmp_norm);
+  if (!camera_keypoints.empty()) {
+    keypoints = camera_keypoints[0];
+    brief_descriptors = camera_brief_descriptors[0];
+    for (const cv::KeyPoint& keypoint : keypoints) {
+      Eigen::Vector3d tmp_p;
+      project_normal(Eigen::Vector2d(keypoint.pt.x, keypoint.pt.y), tmp_p);
+      cv::KeyPoint normalized;
+      normalized.pt = cv::Point2f(tmp_p.x() / tmp_p.z(), tmp_p.y() / tmp_p.z());
+      keypoints_norm.push_back(normalized);
+    }
   }
 }
 
@@ -434,15 +452,21 @@ bool Keyframe::PnPRANSAC(const std::vector<cv::Point2f>& matched_2d_old,
                          std::vector<uchar>& status,
                          Eigen::Vector3d& PnP_T_old,
                          Eigen::Matrix3d& PnP_R_old,
-                         bool* threw_exception) {
+                         bool* threw_exception,
+                         size_t camera_index) {
   status.assign(matched_2d_old.size(), 0);
   if (threw_exception) *threw_exception = false;
   if (matched_2d_old.size() != matched_3d.size()) return false;
 
-  if (params_.camera_calibration_.projection_type_ == "double_sphere") {
+  const CameraCalibration& selected_calibration =
+      camera_index < params_.camera_calibrations_.size()
+          ? params_.camera_calibrations_[camera_index]
+          : params_.camera_calibration_;
+
+  if (selected_calibration.projection_type_ == "double_sphere") {
     try {
       using DoubleSphereCamera = okvis::cameras::DoubleSphereCamera<okvis::cameras::NoDistortion>;
-      const CameraCalibration& calibration = params_.camera_calibration_;
+      const CameraCalibration& calibration = selected_calibration;
       const DoubleSphereCamera camera(calibration.image_dimension_.x(),
                                       calibration.image_dimension_.y(),
                                       calibration.focal_length_.x(),
@@ -500,12 +524,12 @@ bool Keyframe::PnPRANSAC(const std::vector<cv::Point2f>& matched_2d_old,
 
   cv::Mat r, rvec, t, tmp_r;
 
-  cv::Mat K = (cv::Mat_<double>(3, 3) << params_.camera_calibration_.focal_length_.x(),
+  cv::Mat K = (cv::Mat_<double>(3, 3) << selected_calibration.focal_length_.x(),
                0,
-               params_.camera_calibration_.principal_point_.x(),
+               selected_calibration.principal_point_.x(),
                0,
-               params_.camera_calibration_.focal_length_.y(),
-               params_.camera_calibration_.principal_point_.y(),
+               selected_calibration.focal_length_.y(),
+               selected_calibration.principal_point_.y(),
                0,
                0,
                1.0);
@@ -537,7 +561,7 @@ bool Keyframe::PnPRANSAC(const std::vector<cv::Point2f>& matched_2d_old,
     pnp_solver_succeeded = solvePnPRansac(matched_3d,
                                           matched_2d_old,
                                           K,
-                                          params_.camera_calibration_.distortion_coefficients_,
+                                          selected_calibration.distortion_coefficients_,
                                           rvec,
                                           t,
                                           false,
@@ -567,6 +591,124 @@ bool Keyframe::PnPRANSAC(const std::vector<cv::Point2f>& matched_2d_old,
   PnP_R_old = R_w_c_old;
   PnP_T_old = T_w_c_old;
   return pnp_solver_succeeded;
+}
+
+Eigen::Matrix4d Keyframe::cameraPoseToPrimaryPose(const Eigen::Matrix4d& T_WC_camera,
+                                                  const Eigen::Matrix4d& T_SC_camera,
+                                                  const Eigen::Matrix4d& T_SC_primary) {
+  return T_WC_camera * T_SC_camera.inverse() * T_SC_primary;
+}
+
+Keyframe::CameraPairDiagnostic Keyframe::diagnoseCameraPair(const Keyframe* old_kf,
+                                                            size_t current_camera,
+                                                            size_t historical_camera) {
+  CameraPairDiagnostic result;
+  result.current_camera = current_camera;
+  result.historical_camera = historical_camera;
+  if (old_kf == nullptr || current_camera >= camera_window_brief_descriptors.size() ||
+      current_camera >= camera_point_3d.size() ||
+      current_camera >= camera_point_2d_uv.size() ||
+      historical_camera >= old_kf->camera_brief_descriptors.size() ||
+      historical_camera >= old_kf->camera_keypoints.size() ||
+      historical_camera >= params_.camera_calibrations_.size() ||
+      params_.camera_calibrations_.empty()) {
+    return result;
+  }
+
+  const auto& current_descriptors = camera_window_brief_descriptors[current_camera];
+  const auto& current_points = camera_point_3d[current_camera];
+  const auto& current_keypoints = camera_point_2d_uv[current_camera];
+  const auto& historical_descriptors = old_kf->camera_brief_descriptors[historical_camera];
+  const auto& historical_keypoints = old_kf->camera_keypoints[historical_camera];
+  result.tracked_points =
+      std::min({current_descriptors.size(), current_points.size(), current_keypoints.size()});
+
+  std::vector<cv::Point2f> matched_2d;
+  std::vector<cv::Point3f> matched_3d;
+  matched_2d.reserve(result.tracked_points);
+  matched_3d.reserve(result.tracked_points);
+  for (size_t current_index = 0; current_index < result.tracked_points; ++current_index) {
+    int best_distance = 128;
+    int best_index = -1;
+    for (size_t historical_index = 0; historical_index < historical_descriptors.size(); ++historical_index) {
+      const int distance = HammingDis(current_descriptors[current_index],
+                                      historical_descriptors[historical_index]);
+      if (distance < best_distance) {
+        best_distance = distance;
+        best_index = static_cast<int>(historical_index);
+      }
+    }
+    if (best_index >= 0 && best_distance < 80 &&
+        static_cast<size_t>(best_index) < historical_keypoints.size()) {
+      matched_2d.push_back(historical_keypoints[best_index].pt);
+      matched_3d.push_back(current_points[current_index]);
+      result.descriptor_current_points.push_back(current_keypoints[current_index]);
+      result.descriptor_historical_points.push_back(historical_keypoints[best_index].pt);
+    }
+  }
+  result.descriptor_matches = matched_2d.size();
+
+  if (static_cast<int>(matched_2d.size()) <= params_.loop_closure_params_.min_correspondences) {
+    return result;
+  }
+
+  std::vector<uchar> status;
+  Eigen::Vector3d historical_camera_position;
+  Eigen::Matrix3d historical_camera_rotation;
+  result.pnp_attempted = true;
+  result.pnp_solver_succeeded = PnPRANSAC(matched_2d,
+                                          matched_3d,
+                                          status,
+                                          historical_camera_position,
+                                          historical_camera_rotation,
+                                          &result.pnp_exception,
+                                          historical_camera);
+  result.pnp_inliers = static_cast<size_t>(std::count(status.begin(), status.end(), uchar{1}));
+  const size_t status_count = std::min(
+      status.size(),
+      std::min(result.descriptor_current_points.size(),
+               result.descriptor_historical_points.size()));
+  for (size_t index = 0; index < status_count; ++index) {
+    if (status[index] == 0u) continue;
+    result.pnp_current_points.push_back(result.descriptor_current_points[index]);
+    result.pnp_historical_points.push_back(result.descriptor_historical_points[index]);
+  }
+  if (!result.pnp_solver_succeeded) return result;
+
+  Eigen::Matrix4d T_WC_historical = Eigen::Matrix4d::Identity();
+  T_WC_historical.block<3, 3>(0, 0) = historical_camera_rotation;
+  T_WC_historical.block<3, 1>(0, 3) = historical_camera_position;
+  const Eigen::Matrix4d& T_SC_historical = params_.camera_calibrations_[historical_camera].T_imu_cam0_;
+  const Eigen::Matrix4d& T_SC0 = params_.camera_calibrations_.front().T_imu_cam0_;
+  const Eigen::Matrix4d T_WC0_historical =
+      cameraPoseToPrimaryPose(T_WC_historical, T_SC_historical, T_SC0);
+  const Eigen::Matrix3d R_WC0_historical = T_WC0_historical.block<3, 3>(0, 0);
+  const Eigen::Vector3d p_WC0_historical = T_WC0_historical.block<3, 1>(0, 3);
+  const Eigen::Vector3d relative_translation =
+      R_WC0_historical.transpose() * (origin_svin_T - p_WC0_historical);
+  result.relative_translation_m = relative_translation.norm();
+  result.relative_yaw_deg = Utils::normalizeAngle(Utils::R2ypr(origin_svin_R).x() -
+                                                   Utils::R2ypr(R_WC0_historical).x());
+  result.relative_t = relative_translation;
+  result.relative_q = R_WC0_historical.transpose() * origin_svin_R;
+  result.yaw_gate_passed =
+      std::abs(result.relative_yaw_deg) < params_.loop_closure_params_.max_yaw_diff;
+  result.position_gate_passed =
+      result.relative_translation_m < params_.loop_closure_params_.max_position_diff;
+  result.accepted = result.pnp_inliers >
+                        static_cast<size_t>(params_.loop_closure_params_.min_correspondences) &&
+                    result.yaw_gate_passed && result.position_gate_passed;
+  return result;
+}
+
+void Keyframe::acceptCameraPairConnection(const Keyframe* old_kf,
+                                          const CameraPairDiagnostic& verification) {
+  if (old_kf == nullptr || !verification.accepted) return;
+  has_loop = true;
+  loop_index = old_kf->index;
+  loop_info << verification.relative_t.x(), verification.relative_t.y(), verification.relative_t.z(),
+      verification.relative_q.w(), verification.relative_q.x(), verification.relative_q.y(),
+      verification.relative_q.z(), verification.relative_yaw_deg;
 }
 
 bool Keyframe::findConnection(Keyframe* old_kf) {
@@ -764,9 +906,10 @@ bool Keyframe::findConnection(Keyframe* old_kf) {
         loop_closure_file.setf(std::ios::fixed, std::ios::floatfield);
         Eigen::Vector3d relative_ypr = Utils::R2ypr(relative_q.toRotationMatrix());
         loop_closure_file.precision(9);
-        loop_closure_file << index << " " << time_stamp << " " << old_kf->index << " " << old_kf->time_stamp << " "
-                          << relative_t.x() << " " << relative_t.y() << " " << relative_t.z() << " "
-                          << relative_ypr.transpose() << std::endl;
+        loop_closure_file << index << '\t' << time_stamp << '\t' << old_kf->index << '\t'
+                          << old_kf->time_stamp << '\t' << relative_t.x() << '\t' << relative_t.y()
+                          << '\t' << relative_t.z() << '\t' << relative_ypr.x() << '\t'
+                          << relative_ypr.y() << '\t' << relative_ypr.z() << "\tcam 0 -> cam 0\n";
         loop_closure_file.close();
       }
       has_loop = true;

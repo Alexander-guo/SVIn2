@@ -5,6 +5,7 @@
 #include <pcl/point_types.h>
 
 #include <map>
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -119,7 +120,7 @@ class LoopClosure {
   // TODO(bjoshi): I had issues with using pointers to Eigen::Matrix4d. So using cv::Mat for now
   utils::ThreadsafeTemporalBuffer<cv::Mat> primitive_estimator_poses_buffer_;
 
-  bool shutdown_;
+  std::atomic_bool shutdown_;
 
   PoseCallback primitive_publish_callback_;
 };

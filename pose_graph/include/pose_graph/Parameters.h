@@ -14,6 +14,9 @@ struct LoopClosureParams {
   int keyframe_queue_size;
   double max_yaw_diff;
   double max_position_diff;
+  bool multicamera_enabled;
+  bool multicamera_diagnostics;
+  int multicamera_matching_threads;
 };
 
 struct HealthParams {

@@ -30,6 +30,9 @@ Parameters::Parameters() {
   loop_closure_params_.keyframe_queue_size = 5;
   loop_closure_params_.max_yaw_diff = 25.0;
   loop_closure_params_.max_position_diff = 15.0;
+  loop_closure_params_.multicamera_enabled = false;
+  loop_closure_params_.multicamera_diagnostics = false;
+  loop_closure_params_.multicamera_matching_threads = 1;
   resize_factor_ = 1.0;
 }
 
@@ -109,6 +112,32 @@ void Parameters::loadParameters(const std::string& config_file) {
     }
     LOG(INFO) << "Maximum loop-closure position difference: " << loop_closure_params_.max_position_diff << " m";
   }
+
+  if (fsSettings["loop_closure_params"]["multicamera_diagnostics"].isInt()) {
+    loop_closure_params_.multicamera_diagnostics =
+        static_cast<int>(fsSettings["loop_closure_params"]["multicamera_diagnostics"]) != 0;
+  }
+
+  if (fsSettings["loop_closure_params"]["multicamera_enable"].isInt()) {
+    loop_closure_params_.multicamera_enabled =
+        static_cast<int>(fsSettings["loop_closure_params"]["multicamera_enable"]);
+  }
+  LOG(INFO) << "Multicamera loop closure enabled: " << loop_closure_params_.multicamera_enabled;
+
+  if (fsSettings["loop_closure_params"]["multicamera_matching_threads"].isInt()) {
+    const int matching_threads =
+        static_cast<int>(fsSettings["loop_closure_params"]["multicamera_matching_threads"]);
+    if (matching_threads > 0) {
+      loop_closure_params_.multicamera_matching_threads = matching_threads;
+    } else {
+      LOG(WARNING) << "loop_closure_params.multicamera_matching_threads must be greater than 0; keeping "
+                   << loop_closure_params_.multicamera_matching_threads;
+    }
+  }
+  LOG(INFO) << "Multicamera loop-closure matching threads: "
+            << loop_closure_params_.multicamera_matching_threads;
+  LOG(INFO) << "Multicamera loop-closure shadow diagnostics: "
+            << loop_closure_params_.multicamera_diagnostics;
 
   // Determine source directory of this file
   std::filesystem::path this_file(__FILE__);

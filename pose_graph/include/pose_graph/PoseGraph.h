@@ -1,6 +1,7 @@
 #pragma once
 
 #include <assert.h>
+#include <atomic>
 #include <ceres/autodiff_cost_function.h>
 #include <ceres/autodiff_manifold.h>
 #include <ceres/cost_function.h>
@@ -55,6 +56,8 @@ class PoseGraph {
 
  private:
   int detectLoop(Keyframe* keyframe, int frame_index);
+  int detectMulticameraLoop(Keyframe* keyframe, int frame_index);
+  void runMulticameraDiagnostics(Keyframe* keyframe, int frame_index, float score_threshold);
   void optimize4DoFPoseGraph();
   void optimize6DoFPoseGraph();
   void updatePath();
@@ -74,6 +77,7 @@ class PoseGraph {
   int base_sequence;
 
   BriefDatabase db;
+  std::vector<BriefDatabase> multicamera_diagnostic_databases_;
   BriefVocabulary* voc;
 
   bool is_fast_localization_;
@@ -81,6 +85,10 @@ class PoseGraph {
  public:
   void set_fast_relocalization(const bool localization_flag);
   void startOptimizationThread(bool is_vio_optimization = true);
+  void shutdown();
+
+ private:
+  std::atomic_bool shutdown_requested_{false};
 };
 
 template <typename T>

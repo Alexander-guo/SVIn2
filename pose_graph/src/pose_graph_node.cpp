@@ -60,25 +60,9 @@ void setupLoopClosureDebugOutputs(const std::string& base_path, bool initialize_
     std::filesystem::remove(loop_closure_file);
   }
   std::ofstream loop_path_file(loop_closure_file, std::ios::out);
-  loop_path_file << "cur_kf_id"
-                 << " "
-                 << "cur_kf_ts"
-                 << " "
-                 << "matched_kf_id"
-                 << " "
-                 << "matched_kf_ts"
-                 << " "
-                 << "relative_tx"
-                 << " "
-                 << "relative_ty"
-                 << " "
-                 << "relative_tz"
-                 << " "
-                 << "relative_yaw"
-                 << " "
-                 << "relative_pitch"
-                 << " "
-                 << "relative_roll" << std::endl;
+  loop_path_file << "cur_kf_id\tcur_kf_ts\tmatched_kf_id\tmatched_kf_ts\trelative_tx\t"
+                    "relative_ty\trelative_tz\trelative_yaw\trelative_pitch\trelative_roll\t"
+                    "camera_pair\n";
   loop_path_file.close();
 
   std::string loop_funnel_file = base_path + "/loop_closure_funnel.csv";
@@ -88,6 +72,10 @@ void setupLoopClosureDebugOutputs(const std::string& base_path, bool initialize_
   std::string dbow_funnel_file = base_path + "/loop_closure_dbow_funnel.csv";
   if (std::filesystem::exists(dbow_funnel_file)) {
     std::filesystem::remove(dbow_funnel_file);
+  }
+  std::string multicamera_shadow_file = base_path + "/loop_closure_multicamera_shadow.csv";
+  if (std::filesystem::exists(multicamera_shadow_file)) {
+    std::filesystem::remove(multicamera_shadow_file);
   }
 
   if (initialize_diagnostic_csvs) {
@@ -105,6 +93,15 @@ void setupLoopClosureDebugOutputs(const std::string& base_path, bool initialize_
                           "query_result_count,passing_result_count,best_passing_candidate_id,best_passing_score,"
                           "selected_candidate_id,temporal_gap,decision\n";
     dbow_funnel_stream.close();
+
+    std::ofstream multicamera_shadow_stream(multicamera_shadow_file, std::ios::out);
+    multicamera_shadow_stream
+        << "current_kf_id,current_timestamp,current_camera,historical_camera,rank,candidate_kf_id,dbow_score,"
+           "score_threshold,score_passed,verification_attempted,tracked_points,descriptor_matches,"
+           "pnp_solver_succeeded,pnp_exception,"
+           "pnp_inliers,relative_yaw_deg,relative_translation_m,yaw_gate_passed,"
+           "position_gate_passed,accepted,selected\n";
+    multicamera_shadow_stream.close();
   }
 }
 
@@ -152,6 +149,26 @@ int main(int argc, char** argv) {
 
   Parameters params;
   params.loadParameters(config_file);
+  if (!node->has_parameter("output_directory")) {
+    node->declare_parameter<std::string>("output_directory", "");
+  }
+  const std::string output_directory = node->get_parameter("output_directory").as_string();
+  if (!output_directory.empty()) {
+    params.output_path_ = std::filesystem::absolute(output_directory).string();
+    params.debug_output_path_ = params.output_path_ + "/debug_output";
+    params.svin_traj_path_ = params.output_path_ + "/svin_results/";
+    std::filesystem::create_directories(params.debug_output_path_);
+    std::filesystem::create_directories(params.svin_traj_path_);
+    LOG(INFO) << "Pose-graph output override: " << params.output_path_;
+  }
+  if (!node->has_parameter("multicamera_loop_closure_diagnostics")) {
+    node->declare_parameter<bool>("multicamera_loop_closure_diagnostics",
+                                  params.loop_closure_params_.multicamera_diagnostics);
+  }
+  params.loop_closure_params_.multicamera_diagnostics =
+      node->get_parameter("multicamera_loop_closure_diagnostics").as_bool();
+  LOG(INFO) << "Effective multicamera loop-closure shadow diagnostics: "
+            << params.loop_closure_params_.multicamera_diagnostics;
 
   if (params.debug_mode_) {
     setupGeneralDebugOutputs(params.debug_output_path_);
@@ -286,6 +303,7 @@ int main(int argc, char** argv) {
   publisher->saveTrajectory(save_path);
   LOG(INFO) << "Shutting down threads...";
   loop_closure->shutdown();
+  if (process_thread.joinable()) process_thread.join();
 
   return EXIT_SUCCESS;
 }

@@ -6,6 +6,7 @@
 #include <Eigen/Core>
 #include <Eigen/Dense>
 #include <map>
+#include <limits>
 #include <opencv2/core.hpp>
 #include <opencv2/core/eigen.hpp>
 #include <opencv2/features2d.hpp>
@@ -32,6 +33,28 @@ class BriefExtractor {
 class Keyframe {
  public:
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+  struct CameraPairDiagnostic {
+    size_t current_camera = 0;
+    size_t historical_camera = 0;
+    size_t tracked_points = 0;
+    size_t descriptor_matches = 0;
+    size_t pnp_inliers = 0;
+    bool pnp_solver_succeeded = false;
+    bool pnp_attempted = false;
+    bool pnp_exception = false;
+    bool yaw_gate_passed = false;
+    bool position_gate_passed = false;
+    bool accepted = false;
+    double relative_yaw_deg = std::numeric_limits<double>::quiet_NaN();
+    double relative_translation_m = std::numeric_limits<double>::quiet_NaN();
+    Eigen::Vector3d relative_t = Eigen::Vector3d::Zero();
+    Eigen::Quaterniond relative_q = Eigen::Quaterniond::Identity();
+    std::vector<cv::KeyPoint> descriptor_current_points;
+    std::vector<cv::Point2f> descriptor_historical_points;
+    std::vector<cv::KeyPoint> pnp_current_points;
+    std::vector<cv::Point2f> pnp_historical_points;
+  };
+
   Keyframe(int64_t _time_stamp,
            std::vector<Eigen::Vector3i>& _point_ids,  // NOLINT
            int _index,
@@ -78,7 +101,16 @@ class Keyframe {
                  std::vector<uchar>& status,                           // NOLINT
                  Eigen::Vector3d& PnP_T_old,                           // NOLINT
                  Eigen::Matrix3d& PnP_R_old,                           // NOLINT
-                 bool* threw_exception = nullptr);                     // NOLINT
+                 bool* threw_exception = nullptr,
+                 size_t camera_index = 0);                             // NOLINT
+  CameraPairDiagnostic diagnoseCameraPair(const Keyframe* old_kf,
+                                          size_t current_camera,
+                                          size_t historical_camera);
+  void acceptCameraPairConnection(const Keyframe* old_kf,
+                                  const CameraPairDiagnostic& verification);
+  static Eigen::Matrix4d cameraPoseToPrimaryPose(const Eigen::Matrix4d& T_WC_camera,
+                                                 const Eigen::Matrix4d& T_SC_camera,
+                                                 const Eigen::Matrix4d& T_SC_primary);
   void getSVInPose(Eigen::Vector3d& _T_w_i, Eigen::Matrix3d& _R_w_i);  // NOLINT
   void getPose(Eigen::Vector3d& _T_w_i, Eigen::Matrix3d& _R_w_i);      // NOLINT
   void updatePose(const Eigen::Vector3d& _T_w_i, const Eigen::Matrix3d& _R_w_i);
@@ -129,6 +161,11 @@ class Keyframe {
   std::vector<std::vector<cv::Point3f>> camera_point_3d;
   std::vector<std::vector<cv::KeyPoint>> camera_point_2d_uv;
   std::vector<std::vector<Eigen::Vector3i>> camera_point_ids;
+  std::vector<std::vector<DVision::BRIEF256::bitset>> camera_window_brief_descriptors;
+  std::vector<std::vector<cv::KeyPoint>> camera_keypoints;
+  std::vector<std::vector<DVision::BRIEF256::bitset>> camera_brief_descriptors;
+  std::vector<DBoW2::BowVector> camera_bow_vectors;
+
   std::vector<cv::KeyPoint> keypoints;
   std::vector<cv::KeyPoint> keypoints_norm;
   std::vector<cv::KeyPoint> window_keypoints_norm;

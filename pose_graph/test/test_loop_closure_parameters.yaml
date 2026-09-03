@@ -4,6 +4,9 @@ loop_closure_params:
   keyframe_queue: -1
   max_yaw_diff: 30.0
   max_position_diff: 6.0
+  multicamera_enable: 1
+  multicamera_diagnostics: 1
+  multicamera_matching_threads: 4
 output_params:
   debug: 1
   lc_diagnostic: true

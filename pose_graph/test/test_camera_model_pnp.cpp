@@ -140,4 +140,123 @@ TEST(CameraModelPnP, PreservesPinholePosePath) {
   EXPECT_LT(Eigen::AngleAxisd(estimated_rotation.transpose() * R_w_c).angle(), 0.01);
 }
 
+TEST(CameraModelPnP, ConvertsSecondaryCameraPoseToPrimaryCameraConvention) {
+  Eigen::Matrix4d T_WS = Eigen::Matrix4d::Identity();
+  T_WS.block<3, 3>(0, 0) =
+      (Eigen::AngleAxisd(0.4, Eigen::Vector3d::UnitZ()) *
+       Eigen::AngleAxisd(-0.2, Eigen::Vector3d::UnitY()))
+          .toRotationMatrix();
+  T_WS.block<3, 1>(0, 3) = Eigen::Vector3d(1.0, -2.0, 0.5);
+
+  Eigen::Matrix4d T_SC0 = Eigen::Matrix4d::Identity();
+  T_SC0.block<3, 3>(0, 0) =
+      Eigen::AngleAxisd(0.5 * M_PI, Eigen::Vector3d::UnitX()).toRotationMatrix();
+  T_SC0.block<3, 1>(0, 3) = Eigen::Vector3d(0.02, 0.0, -0.01);
+
+  Eigen::Matrix4d T_SC1 = Eigen::Matrix4d::Identity();
+  T_SC1.block<3, 3>(0, 0) =
+      Eigen::AngleAxisd(M_PI, Eigen::Vector3d::UnitZ()).toRotationMatrix() *
+      T_SC0.block<3, 3>(0, 0);
+  T_SC1.block<3, 1>(0, 3) = Eigen::Vector3d(-0.02, 0.01, -0.015);
+
+  const Eigen::Matrix4d T_WC1 = T_WS * T_SC1;
+  const Eigen::Matrix4d expected_T_WC0 = T_WS * T_SC0;
+  const Eigen::Matrix4d converted_T_WC0 =
+      Keyframe::cameraPoseToPrimaryPose(T_WC1, T_SC1, T_SC0);
+
+  EXPECT_LT((converted_T_WC0 - expected_T_WC0).norm(), 1.0e-12);
+}
+
+TEST(CameraModelPnP, VerifiesCrossCameraConstraintInPrimaryCameraConvention) {
+  Parameters params = makeDoubleSphereParameters();
+  params.loop_closure_params_.min_correspondences = 12;
+  params.loop_closure_params_.max_yaw_diff = 60.0;
+  params.loop_closure_params_.max_position_diff = 5.0;
+  params.camera_calibrations_.assign(2, params.camera_calibration_);
+
+  Eigen::Matrix4d T_SC0 = Eigen::Matrix4d::Identity();
+  Eigen::Matrix4d T_SC1 = Eigen::Matrix4d::Identity();
+  T_SC1.block<3, 3>(0, 0) =
+      Eigen::AngleAxisd(M_PI, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+  T_SC1.block<3, 1>(0, 3) = Eigen::Vector3d(0.04, 0.0, 0.0);
+  params.camera_calibrations_[0].T_imu_cam0_ = T_SC0;
+  params.camera_calibrations_[1].T_imu_cam0_ = T_SC1;
+
+  Eigen::Matrix4d T_WC0_old = Eigen::Matrix4d::Identity();
+  T_WC0_old.block<3, 3>(0, 0) =
+      Eigen::AngleAxisd(-0.20, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+  T_WC0_old.block<3, 1>(0, 3) = Eigen::Vector3d(-0.5, 0.2, 0.1);
+  const Eigen::Matrix4d T_WC1_old = T_WC0_old * T_SC0.inverse() * T_SC1;
+
+  Eigen::Matrix4d T_WC0_current = Eigen::Matrix4d::Identity();
+  T_WC0_current.block<3, 3>(0, 0) =
+      Eigen::AngleAxisd(0.12, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+  T_WC0_current.block<3, 1>(0, 3) = Eigen::Vector3d(0.3, -0.1, 0.2);
+
+  Eigen::Vector3d zero_translation = Eigen::Vector3d::Zero();
+  Eigen::Matrix3d identity_rotation = Eigen::Matrix3d::Identity();
+  std::map<Keyframe*, int> covisibility;
+  Keyframe current(0, 100, zero_translation, identity_rotation, covisibility, 0, params, false);
+  Keyframe historical(0, 10, zero_translation, identity_rotation, covisibility, 0, params, false);
+  current.origin_svin_R = T_WC0_current.block<3, 3>(0, 0);
+  current.origin_svin_T = T_WC0_current.block<3, 1>(0, 3);
+  current.camera_window_brief_descriptors.resize(2);
+  current.camera_point_3d.resize(2);
+  current.camera_point_2d_uv.resize(2);
+  historical.camera_brief_descriptors.resize(2);
+  historical.camera_keypoints.resize(2);
+
+  const CameraCalibration& calibration = params.camera_calibrations_[1];
+  const DoubleSphereCamera camera(calibration.image_dimension_.x(),
+                                  calibration.image_dimension_.y(),
+                                  calibration.focal_length_.x(),
+                                  calibration.focal_length_.y(),
+                                  calibration.principal_point_.x(),
+                                  calibration.principal_point_.y(),
+                                  calibration.double_sphere_params_.x(),
+                                  calibration.double_sphere_params_.y(),
+                                  okvis::cameras::NoDistortion());
+  int descriptor_index = 0;
+  for (int v = 100; v <= 700; v += 120) {
+    for (int u = 100; u <= 700; u += 120) {
+      Eigen::Vector3d bearing;
+      if (!camera.backProject(Eigen::Vector2d(u, v), &bearing)) continue;
+      const Eigen::Vector3d point_w =
+          T_WC1_old.block<3, 3>(0, 0) * ((3.0 + 0.01 * descriptor_index) * bearing.normalized()) +
+          T_WC1_old.block<3, 1>(0, 3);
+      DVision::BRIEF256::bitset descriptor;
+      descriptor.set(static_cast<size_t>(descriptor_index));
+      descriptor.set(static_cast<size_t>(descriptor_index + 64));
+      current.camera_window_brief_descriptors[0].push_back(descriptor);
+      current.camera_point_3d[0].emplace_back(point_w.x(), point_w.y(), point_w.z());
+      current.camera_point_2d_uv[0].emplace_back(static_cast<float>(u), static_cast<float>(v), 1.0F);
+      historical.camera_brief_descriptors[1].push_back(descriptor);
+      historical.camera_keypoints[1].emplace_back(static_cast<float>(u), static_cast<float>(v), 1.0F);
+      ++descriptor_index;
+    }
+  }
+  ASSERT_GT(current.camera_point_3d[0].size(),
+            static_cast<size_t>(params.loop_closure_params_.min_correspondences));
+
+  const Keyframe::CameraPairDiagnostic verification = current.diagnoseCameraPair(&historical, 0, 1);
+  ASSERT_TRUE(verification.pnp_solver_succeeded);
+  EXPECT_TRUE(verification.pnp_attempted);
+  EXPECT_TRUE(verification.accepted);
+  EXPECT_EQ(verification.descriptor_current_points.size(), verification.descriptor_matches);
+  EXPECT_EQ(verification.descriptor_historical_points.size(), verification.descriptor_matches);
+  EXPECT_EQ(verification.pnp_current_points.size(), verification.pnp_inliers);
+  EXPECT_EQ(verification.pnp_historical_points.size(), verification.pnp_inliers);
+  EXPECT_GT(verification.pnp_inliers,
+            static_cast<size_t>(params.loop_closure_params_.min_correspondences));
+  const Eigen::Vector3d expected_relative_t =
+      T_WC0_old.block<3, 3>(0, 0).transpose() *
+      (T_WC0_current.block<3, 1>(0, 3) - T_WC0_old.block<3, 1>(0, 3));
+  EXPECT_LT((verification.relative_t - expected_relative_t).norm(), 0.05);
+  EXPECT_LT(Eigen::AngleAxisd(verification.relative_q.toRotationMatrix().transpose() *
+                              (T_WC0_old.block<3, 3>(0, 0).transpose() *
+                               T_WC0_current.block<3, 3>(0, 0)))
+                .angle(),
+            0.01);
+}
+
 }  // namespace

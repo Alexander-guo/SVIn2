@@ -157,6 +157,9 @@ loop_closure_params:
     keyframe_queue: 10 #Use 1 for real-time on robot. Something around 5-10 could be ideal. -1 not to skip keyframes at all.
     max_yaw_diff: 30.0 #Max yaw difference between keyframe and query frame (degrees)
     max_position_diff: 6.0 #Max position difference between keyframe and query frame (meters)
+    multicamera_enable: 1 # active all-pairs retrieval and verification for one rig keyframe
+    multicamera_matching_threads: 4 # parallel verification; DBoW query/add remains serialized
+    multicamera_diagnostics: 1 # per-camera-pair retrieval and verification CSV
 
 health:
     enable: 0
@@ -171,5 +174,6 @@ global_map_params:
 
 output_params:
     debug: 1
+    lc_diagnostic: 1 # Save loop-closure funnel CSVs only when debug is also enabled
     output_dir: ../pose_graph 
     # does not detect ~, so full path is needed if the path is not detected, /tmp is used a default

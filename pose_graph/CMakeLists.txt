@@ -109,7 +109,10 @@ add_executable(pose_graph_node src/pose_graph_node.cpp)
 ament_target_dependencies(pose_graph_node ${ament_libraries})
 target_link_libraries(pose_graph_node ${PROJECT_NAME}_lib )
 install(TARGETS pose_graph_node DESTINATION lib/${PROJECT_NAME})
-install(PROGRAMS scripts/summarize_loop_closure_funnel.py DESTINATION lib/${PROJECT_NAME})
+install(PROGRAMS
+  scripts/summarize_loop_closure_funnel.py
+  scripts/summarize_loop_closure_multicamera_shadow.py
+  DESTINATION lib/${PROJECT_NAME})
 
 if(BUILD_TESTING)
   ament_add_gtest(test_camera_model_pnp test/test_camera_model_pnp.cpp)
@@ -123,6 +126,14 @@ if(BUILD_TESTING)
   ament_add_gtest(test_camera_pose_visualization test/test_camera_pose_visualization.cpp)
   target_link_libraries(test_camera_pose_visualization ${PROJECT_NAME}_lib)
   ament_target_dependencies(test_camera_pose_visualization ${ament_libraries})
+
+  find_package(Python3 REQUIRED COMPONENTS Interpreter)
+  add_test(
+    NAME test_summarize_loop_closure_multicamera_shadow
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/test/test_summarize_loop_closure_multicamera_shadow.py)
+  set_tests_properties(test_summarize_loop_closure_multicamera_shadow
+                       PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 endif()
 
 ament_export_include_directories(include)

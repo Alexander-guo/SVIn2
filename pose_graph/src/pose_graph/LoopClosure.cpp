@@ -387,6 +387,7 @@ void LoopClosure::shutdown() {
   LOG_IF(ERROR, shutdown_) << "Shutdown requested, but PoseGraph module was already shutdown.";
   keyframe_tracking_queue_.shutdown();
   shutdown_ = true;
+  pose_graph_->shutdown();
   LOG(INFO) << "Shutting down PoseGraph module.";
 }
 

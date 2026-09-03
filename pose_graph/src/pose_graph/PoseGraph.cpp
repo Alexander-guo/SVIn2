@@ -6,15 +6,101 @@
 #include <ceres/solver.h>
 
 #include <fstream>
+#include <atomic>
+#include <algorithm>
+#include <filesystem>
 #include <iomanip>
 #include <list>
 #include <map>
+#include <thread>
 #include <set>
 #include <string>
 
 #include "pose_graph/Pose3DError.h"
+#include "utils/UtilsOpenCV.h"
 
 namespace {
+
+struct MulticameraLoopCandidate {
+  size_t current_camera = 0;
+  size_t historical_camera = 0;
+  size_t rank = 0;
+  int keyframe_id = -1;
+  double score = 0.0;
+  double score_threshold = 0.0;
+  bool score_passed = false;
+  Keyframe* keyframe = nullptr;
+  Keyframe::CameraPairDiagnostic verification;
+};
+
+std::string cameraPairDirectory(size_t current_camera, size_t historical_camera) {
+  return "cam" + std::to_string(current_camera) + "cam" +
+         std::to_string(historical_camera);
+}
+
+std::string cameraPairLabel(size_t current_camera, size_t historical_camera) {
+  return "cam " + std::to_string(current_camera) + " -> cam " +
+         std::to_string(historical_camera);
+}
+
+cv::Mat addMulticameraDebugBanner(const cv::Mat& image,
+                                  const std::string& camera_pair,
+                                  int current_id,
+                                  int historical_id,
+                                  const std::string& decision = "",
+                                  const std::string& inlier_summary = "") {
+  if (image.empty()) return image;
+  const int banner_height = 55 + (decision.empty() ? 0 : 40) + (inlier_summary.empty() ? 0 : 40);
+  cv::Mat banner(banner_height,
+                 image.cols,
+                 CV_8UC3,
+                 cv::Scalar(255, 255, 255));
+  cv::putText(banner,
+              camera_pair + "   current: " + std::to_string(current_id) +
+                  "   historical: " + std::to_string(historical_id),
+              cv::Point(20, 36),
+              cv::FONT_HERSHEY_SIMPLEX,
+              0.9,
+              cv::Scalar(0, 0, 0),
+              2);
+  if (!decision.empty()) {
+    cv::putText(banner,
+                "decision: " + decision,
+                cv::Point(20, 77),
+                cv::FONT_HERSHEY_SIMPLEX,
+                0.9,
+                decision == "accepted" ? cv::Scalar(0, 128, 0) : cv::Scalar(0, 0, 255),
+                2);
+  }
+  if (!inlier_summary.empty()) {
+    cv::putText(banner,
+                inlier_summary,
+                cv::Point(20, decision.empty() ? 77 : 117),
+                cv::FONT_HERSHEY_SIMPLEX,
+                0.9,
+                cv::Scalar(0, 0, 0),
+                2);
+  }
+  cv::Mat output;
+  cv::vconcat(banner, image, output);
+  return output;
+}
+
+std::string multicameraRejectionReason(const Keyframe::CameraPairDiagnostic& verification,
+                                       int min_correspondences) {
+  if (!verification.pnp_attempted) return "insufficient_descriptor_matches";
+  if (verification.pnp_exception) return "pnp_exception";
+  if (!verification.pnp_solver_succeeded) return "pnp_solver_failed";
+  if (verification.pnp_inliers <= static_cast<size_t>(min_correspondences)) {
+    return "insufficient_pnp_inliers";
+  }
+  if (!verification.yaw_gate_passed && !verification.position_gate_passed) {
+    return "yaw_and_position_gates_failed";
+  }
+  if (!verification.yaw_gate_passed) return "yaw_gate_failed";
+  if (!verification.position_gate_passed) return "position_gate_failed";
+  return "accepted";
+}
 
 void appendDBoWFunnelRecord(const Keyframe* keyframe,
                             int frame_index,
@@ -63,7 +149,7 @@ PoseGraph::PoseGraph() {
   is_fast_localization_ = true;
 }
 
-PoseGraph::~PoseGraph() { t_optimization.join(); }
+PoseGraph::~PoseGraph() { shutdown(); }
 
 void PoseGraph::set_fast_relocalization(const bool fast_relocalization) { is_fast_localization_ = fast_relocalization; }
 
@@ -73,11 +159,17 @@ void PoseGraph::setBriefVocAndDB(BriefVocabulary* vocabulary, BriefDatabase data
 }
 
 void PoseGraph::startOptimizationThread(bool vio_only_optimization) {
+  shutdown_requested_ = false;
   if (vio_only_optimization) {
     t_optimization = std::thread(&PoseGraph::optimize4DoFPoseGraph, this);
   } else {
     t_optimization = std::thread(&PoseGraph::optimize6DoFPoseGraph, this);
   }
+}
+
+void PoseGraph::shutdown() {
+  shutdown_requested_ = true;
+  if (t_optimization.joinable()) t_optimization.join();
 }
 
 void PoseGraph::addKFToPoseGraph(Keyframe* cur_kf, bool flag_detect_loop) {
@@ -107,14 +199,20 @@ void PoseGraph::addKFToPoseGraph(Keyframe* cur_kf, bool flag_detect_loop) {
   int loop_index = -1;
 
   if (flag_detect_loop) {  // at least 50 KF has been passed
-    loop_index = detectLoop(cur_kf, cur_kf->index);
+    if (cur_kf->params_.loop_closure_params_.multicamera_enabled &&
+        cur_kf->camera_brief_descriptors.size() > 1u) {
+      loop_index = detectMulticameraLoop(cur_kf, cur_kf->index);
+    } else {
+      loop_index = detectLoop(cur_kf, cur_kf->index);
+    }
   } else {
     db.add(cur_kf->brief_descriptors);
   }
 
   if (loop_index != -1) {
     Keyframe* old_kf = getKFPtr(loop_index);
-    if (cur_kf->findConnection(old_kf)) {
+    const bool connection_found = cur_kf->has_loop || cur_kf->findConnection(old_kf);
+    if (connection_found) {
       if (earliest_loop_index > loop_index || earliest_loop_index == -1) earliest_loop_index = loop_index;
 
       Eigen::Vector3d w_P_old, w_P_cur, svin_P_cur;
@@ -234,6 +332,11 @@ int PoseGraph::detectLoop(Keyframe* keyframe, int frame_index) {
   db.query(keyframe->bowVec, ret, 4, frame_index - 50);
   db.add(keyframe->brief_descriptors);
 
+  if (keyframe->params_.loop_closure_params_.multicamera_diagnostics &&
+      keyframe->params_.loopClosureDiagnosticsEnabled()) {
+    runMulticameraDiagnostics(keyframe, frame_index, 0.60F * min_score);
+  }
+
   bool find_loop = false;
   cv::Mat loop_result;
 
@@ -270,8 +373,349 @@ int PoseGraph::detectLoop(Keyframe* keyframe, int frame_index) {
   }
 }
 
+int PoseGraph::detectMulticameraLoop(Keyframe* keyframe, int frame_index) {
+  const size_t camera_count = keyframe->camera_brief_descriptors.size();
+  if (camera_count < 2u) return detectLoop(keyframe, frame_index);
+
+  if (multicamera_diagnostic_databases_.empty()) {
+    multicamera_diagnostic_databases_.resize(camera_count);
+    for (BriefDatabase& camera_database : multicamera_diagnostic_databases_) {
+      camera_database.setVocabulary(*voc, false, 0);
+    }
+  }
+  if (multicamera_diagnostic_databases_.size() != camera_count) {
+    LOG(ERROR) << "Camera count changed inside multicamera loop closure; falling back to camera 0.";
+    return detectLoop(keyframe, frame_index);
+  }
+
+  std::vector<MulticameraLoopCandidate> candidates;
+  for (size_t current_camera = 0; current_camera < camera_count; ++current_camera) {
+    const auto& current_descriptors = keyframe->camera_brief_descriptors[current_camera];
+    if (current_descriptors.empty()) continue;
+
+    DBoW2::BowVector current_bow = keyframe->camera_bow_vectors[current_camera];
+    if (current_bow.empty()) voc->transform(current_descriptors, current_bow);
+
+    float min_neighbor_score = 1.0F;
+    for (const auto& connection : keyframe->mConnectedKeyFrameWeights) {
+      const Keyframe* neighbor = connection.first;
+      if (neighbor == nullptr || current_camera >= neighbor->camera_bow_vectors.size()) continue;
+      DBoW2::BowVector neighbor_bow = neighbor->camera_bow_vectors[current_camera];
+      if (neighbor_bow.empty() && current_camera < neighbor->camera_brief_descriptors.size() &&
+          !neighbor->camera_brief_descriptors[current_camera].empty()) {
+        voc->transform(neighbor->camera_brief_descriptors[current_camera], neighbor_bow);
+      }
+      if (!neighbor_bow.empty()) {
+        min_neighbor_score = std::min(min_neighbor_score,
+                                      static_cast<float>(voc->score(current_bow, neighbor_bow)));
+      }
+    }
+    const double score_threshold = 0.60 * min_neighbor_score;
+
+    for (size_t historical_camera = 0; historical_camera < camera_count; ++historical_camera) {
+      DBoW2::QueryResults results;
+      multicamera_diagnostic_databases_[historical_camera].query(
+          current_bow, results, 4, frame_index - 50);
+      for (size_t rank = 0; rank < results.size(); ++rank) {
+        MulticameraLoopCandidate candidate;
+        candidate.current_camera = current_camera;
+        candidate.historical_camera = historical_camera;
+        candidate.rank = rank + 1u;
+        candidate.keyframe_id = results[rank].Id;
+        candidate.score = results[rank].Score;
+        candidate.score_threshold = score_threshold;
+        candidate.score_passed = frame_index > 50 && results[rank].Score > score_threshold;
+        candidates.push_back(candidate);
+      }
+    }
+  }
+
+  // Query every ordered camera pair before adding this synchronized rig frame.
+  // This preserves one database entry per camera and keeps every DBoW ID equal
+  // to the pose-graph keyframe ID.
+  for (size_t camera = 0; camera < camera_count; ++camera) {
+    const DBoW2::EntryId entry_id =
+        multicamera_diagnostic_databases_[camera].add(keyframe->camera_brief_descriptors[camera]);
+    CHECK_EQ(static_cast<int>(entry_id), frame_index)
+        << "Per-camera DBoW database lost rig-keyframe ID alignment for camera " << camera;
+  }
+
+  // Keyframes are never deleted, so these pointers remain valid after the
+  // short locked snapshot. Do not hold the list lock during matching or PnP.
+  {
+    std::lock_guard<std::mutex> lock(kflistMutex_);
+    for (MulticameraLoopCandidate& candidate : candidates) {
+      if (candidate.score_passed) candidate.keyframe = getKFPtr(candidate.keyframe_id);
+    }
+  }
+
+  std::vector<size_t> verification_indices;
+  for (size_t i = 0; i < candidates.size(); ++i) {
+    if (candidates[i].score_passed && candidates[i].keyframe != nullptr) {
+      verification_indices.push_back(i);
+    }
+  }
+
+  if (!verification_indices.empty()) {
+    std::atomic<size_t> next_job{0u};
+    const size_t worker_count = std::min(
+        verification_indices.size(),
+        static_cast<size_t>(std::max(1, keyframe->params_.loop_closure_params_.multicamera_matching_threads)));
+    std::vector<std::thread> workers;
+    workers.reserve(worker_count);
+    for (size_t worker = 0; worker < worker_count; ++worker) {
+      workers.emplace_back([&]() {
+        while (true) {
+          const size_t job = next_job.fetch_add(1u);
+          if (job >= verification_indices.size()) return;
+          MulticameraLoopCandidate& candidate = candidates[verification_indices[job]];
+          candidate.verification = keyframe->diagnoseCameraPair(candidate.keyframe,
+                                                                candidate.current_camera,
+                                                                candidate.historical_camera);
+        }
+      });
+    }
+    for (std::thread& worker : workers) worker.join();
+  }
+
+  MulticameraLoopCandidate* winner = nullptr;
+  for (MulticameraLoopCandidate& candidate : candidates) {
+    if (!candidate.verification.accepted) continue;
+    if (winner == nullptr ||
+        candidate.verification.pnp_inliers > winner->verification.pnp_inliers ||
+        (candidate.verification.pnp_inliers == winner->verification.pnp_inliers &&
+         candidate.score > winner->score)) {
+      winner = &candidate;
+    }
+  }
+
+  if (keyframe->params_.debug_mode_) {
+    for (const MulticameraLoopCandidate& candidate : candidates) {
+      if (!candidate.score_passed || candidate.keyframe == nullptr ||
+          candidate.current_camera >= keyframe->images.size() ||
+          candidate.current_camera >= keyframe->camera_point_2d_uv.size() ||
+          candidate.historical_camera >= candidate.keyframe->camera_keypoints.size() ||
+          candidate.historical_camera >= candidate.keyframe->images.size()) {
+        continue;
+      }
+      const cv::Mat& current_image = keyframe->images[candidate.current_camera];
+      const cv::Mat& historical_image = candidate.keyframe->images[candidate.historical_camera];
+      if (current_image.empty() || historical_image.empty()) continue;
+
+      const std::string pair_directory =
+          cameraPairDirectory(candidate.current_camera, candidate.historical_camera);
+      const std::string pair_label =
+          cameraPairLabel(candidate.current_camera, candidate.historical_camera);
+      const std::string filename_stem =
+          "cur_" + std::to_string(frame_index) + "_hist_" +
+          std::to_string(candidate.keyframe_id) + "_rank_" +
+          std::to_string(candidate.rank) + ".jpg";
+
+      const std::string candidate_directory =
+          keyframe->params_.debug_output_path_ + "/loop_candidates/" + pair_directory;
+      std::filesystem::create_directories(candidate_directory);
+      cv::Mat current_features = UtilsOpenCV::DrawCircles(
+          current_image, keyframe->camera_point_2d_uv[candidate.current_camera]);
+      cv::Mat historical_features = UtilsOpenCV::DrawCircles(
+          historical_image, candidate.keyframe->camera_keypoints[candidate.historical_camera]);
+      cv::Mat candidate_image = UtilsOpenCV::concatenateTwoImages(current_features, historical_features);
+      candidate_image = addMulticameraDebugBanner(candidate_image,
+                                                   pair_label,
+                                                   frame_index,
+                                                   candidate.keyframe_id);
+      UtilsOpenCV::writeCompressedDebugImage(candidate_directory + "/" + filename_stem,
+                                             candidate_image);
+
+      const std::string descriptor_directory =
+          keyframe->params_.debug_output_path_ + "/descriptor_matched/" + pair_directory;
+      std::filesystem::create_directories(descriptor_directory);
+      cv::Mat descriptor_image = UtilsOpenCV::DrawCornersMatches(
+          current_image,
+          candidate.verification.descriptor_current_points,
+          historical_image,
+          candidate.verification.descriptor_historical_points,
+          true);
+      descriptor_image = addMulticameraDebugBanner(descriptor_image,
+                                                    pair_label,
+                                                    frame_index,
+                                                    candidate.keyframe_id);
+      UtilsOpenCV::writeCompressedDebugImage(descriptor_directory + "/" + filename_stem,
+                                             descriptor_image);
+
+      if (candidate.verification.pnp_attempted) {
+        const std::string decision = multicameraRejectionReason(
+            candidate.verification, keyframe->params_.loop_closure_params_.min_correspondences);
+        const std::string classification = candidate.verification.accepted ? "passed" : "rejected";
+        const std::string pnp_directory = keyframe->params_.debug_output_path_ +
+                                          "/pnp_verified/" + pair_directory + "/" + classification;
+        std::filesystem::create_directories(pnp_directory);
+        cv::Mat pnp_image = UtilsOpenCV::DrawCornersMatches(
+            current_image,
+            candidate.verification.pnp_current_points,
+            historical_image,
+            candidate.verification.pnp_historical_points,
+            true);
+        pnp_image = addMulticameraDebugBanner(pnp_image,
+                                              pair_label,
+                                              frame_index,
+                                              candidate.keyframe_id,
+                                              decision,
+                                              "inlier#: " + std::to_string(candidate.verification.pnp_inliers) +
+                                                  ", required inlier#: " +
+                                                  std::to_string(keyframe->params_.loop_closure_params_.min_correspondences + 1));
+        UtilsOpenCV::writeCompressedDebugImage(pnp_directory + "/" + filename_stem,
+                                               pnp_image);
+      }
+    }
+  }
+
+  if (keyframe->params_.loopClosureDiagnosticsEnabled()) {
+    std::ofstream output(keyframe->params_.debug_output_path_ +
+                             "/loop_closure_multicamera_shadow.csv",
+                         std::ios::app);
+    if (output.is_open()) {
+      for (const MulticameraLoopCandidate& candidate : candidates) {
+        const auto& verification = candidate.verification;
+        output << std::setprecision(17) << frame_index << ',' << keyframe->time_stamp << ','
+               << candidate.current_camera << ',' << candidate.historical_camera << ','
+               << candidate.rank << ',' << candidate.keyframe_id << ',' << candidate.score << ','
+               << candidate.score_threshold << ',' << candidate.score_passed << ','
+               << (candidate.score_passed && candidate.keyframe != nullptr) << ','
+               << verification.tracked_points << ',' << verification.descriptor_matches << ','
+               << verification.pnp_solver_succeeded << ',' << verification.pnp_exception << ','
+               << verification.pnp_inliers << ',' << verification.relative_yaw_deg << ','
+               << verification.relative_translation_m << ',' << verification.yaw_gate_passed << ','
+               << verification.position_gate_passed << ',' << verification.accepted << ','
+               << (&candidate == winner) << '\n';
+      }
+    }
+  }
+
+  if (winner == nullptr) return -1;
+  keyframe->acceptCameraPairConnection(winner->keyframe, winner->verification);
+  if (keyframe->params_.debug_mode_) {
+    const std::string pair_directory =
+        cameraPairDirectory(winner->current_camera, winner->historical_camera);
+    const std::string pair_label =
+        cameraPairLabel(winner->current_camera, winner->historical_camera);
+    const std::string loop_directory =
+        keyframe->params_.debug_output_path_ + "/loop_closure/" + pair_directory;
+    std::filesystem::create_directories(loop_directory);
+    cv::Mat loop_image = UtilsOpenCV::DrawCornersMatches(
+        keyframe->images[winner->current_camera],
+        winner->verification.pnp_current_points,
+        winner->keyframe->images[winner->historical_camera],
+        winner->verification.pnp_historical_points,
+        true);
+    loop_image = addMulticameraDebugBanner(loop_image,
+                                           pair_label,
+                                           frame_index,
+                                           winner->keyframe_id,
+                                           "accepted",
+                                           "inlier#: " + std::to_string(winner->verification.pnp_inliers) +
+                                               ", required inlier#: " +
+                                               std::to_string(keyframe->params_.loop_closure_params_.min_correspondences + 1));
+    UtilsOpenCV::writeCompressedDebugImage(
+        loop_directory + "/cur_" + std::to_string(frame_index) + "_hist_" +
+            std::to_string(winner->keyframe_id) + ".jpg",
+        loop_image);
+
+    std::ofstream loop_file(keyframe->params_.debug_output_path_ + "/loop_closure.txt",
+                            std::ios::app);
+    if (loop_file.is_open()) {
+      const Eigen::Vector3d relative_ypr =
+          Utils::R2ypr(winner->verification.relative_q.toRotationMatrix());
+      loop_file << std::fixed << std::setprecision(9) << frame_index << '\t'
+                << keyframe->time_stamp << '\t' << winner->keyframe_id << '\t'
+                << winner->keyframe->time_stamp << '\t'
+                << winner->verification.relative_t.x() << '\t'
+                << winner->verification.relative_t.y() << '\t'
+                << winner->verification.relative_t.z() << '\t' << relative_ypr.x() << '\t'
+                << relative_ypr.y() << '\t' << relative_ypr.z() << "\tcam " << winner->current_camera
+                << " -> cam " << winner->historical_camera << '\n';
+    }
+  }
+  LOG(INFO) << "Accepted multicamera loop " << frame_index << " -> " << winner->keyframe_id
+            << " using camera " << winner->current_camera << " -> " << winner->historical_camera
+            << " with " << winner->verification.pnp_inliers << " PnP inliers";
+  return winner->keyframe_id;
+}
+
+void PoseGraph::runMulticameraDiagnostics(Keyframe* keyframe,
+                                          int frame_index,
+                                          float score_threshold) {
+  const size_t camera_count = keyframe->camera_brief_descriptors.size();
+  if (camera_count < 2) return;
+
+  if (multicamera_diagnostic_databases_.empty()) {
+    multicamera_diagnostic_databases_.resize(camera_count);
+    for (BriefDatabase& camera_database : multicamera_diagnostic_databases_) {
+      camera_database.setVocabulary(*voc, false, 0);
+    }
+  }
+  if (multicamera_diagnostic_databases_.size() != camera_count) {
+    LOG(ERROR) << "Camera count changed inside multicamera loop-closure diagnostics.";
+    return;
+  }
+
+  std::ofstream output(keyframe->params_.debug_output_path_ +
+                           "/loop_closure_multicamera_shadow.csv",
+                       std::ios::app);
+  if (!output.is_open()) {
+    LOG(ERROR) << "Could not append multicamera loop-closure shadow diagnostics.";
+    return;
+  }
+
+  for (size_t current_camera = 0; current_camera < camera_count; ++current_camera) {
+    const auto& current_descriptors = keyframe->camera_brief_descriptors[current_camera];
+    if (current_descriptors.empty()) continue;
+    DBoW2::BowVector current_bow = keyframe->camera_bow_vectors[current_camera];
+    if (current_bow.empty()) voc->transform(current_descriptors, current_bow);
+
+    for (size_t historical_camera = 0; historical_camera < camera_count; ++historical_camera) {
+      DBoW2::QueryResults results;
+      multicamera_diagnostic_databases_[historical_camera].query(
+          current_bow, results, 4, frame_index - 50);
+      for (size_t rank = 0; rank < results.size(); ++rank) {
+        const bool score_passed = results[rank].Score > score_threshold && frame_index > 50;
+        const bool verification_attempted = score_passed;
+        Keyframe::CameraPairDiagnostic diagnostic;
+        if (verification_attempted) {
+          Keyframe* historical_keyframe = nullptr;
+          {
+            std::lock_guard<std::mutex> lock(kflistMutex_);
+            historical_keyframe = getKFPtr(results[rank].Id);
+          }
+          if (historical_keyframe != nullptr) {
+            diagnostic = keyframe->diagnoseCameraPair(
+                historical_keyframe, current_camera, historical_camera);
+          }
+        }
+        output << std::setprecision(17) << frame_index << ',' << keyframe->time_stamp << ','
+               << current_camera << ',' << historical_camera << ',' << rank + 1 << ','
+               << results[rank].Id << ',' << results[rank].Score << ',' << score_threshold << ','
+               << score_passed << ',' << verification_attempted << ',' << diagnostic.tracked_points << ','
+               << diagnostic.descriptor_matches << ',' << diagnostic.pnp_solver_succeeded << ','
+               << diagnostic.pnp_exception << ',' << diagnostic.pnp_inliers << ','
+               << diagnostic.relative_yaw_deg << ',' << diagnostic.relative_translation_m << ','
+               << diagnostic.yaw_gate_passed << ',' << diagnostic.position_gate_passed << ','
+               << diagnostic.accepted << ",0\n";
+      }
+    }
+  }
+
+  // One entry per rig keyframe is added to every per-camera database so that
+  // DBoW entry IDs remain identical to pose-graph keyframe IDs.
+  for (size_t camera = 0; camera < camera_count; ++camera) {
+    const DBoW2::EntryId entry_id =
+        multicamera_diagnostic_databases_[camera].add(keyframe->camera_brief_descriptors[camera]);
+    CHECK_EQ(static_cast<int>(entry_id), frame_index)
+        << "Per-camera diagnostic DBoW database lost rig-keyframe ID alignment for camera " << camera;
+  }
+}
+
 void PoseGraph::optimize4DoFPoseGraph() {
-  while (true) {
+  while (!shutdown_requested_) {
     int cur_index = -1;
 
     {
@@ -432,7 +876,7 @@ void PoseGraph::optimize4DoFPoseGraph() {
 }
 
 void PoseGraph::optimize6DoFPoseGraph() {
-  while (true) {
+  while (!shutdown_requested_) {
     int cur_index = -1;
     int first_looped_index = -1;
 
